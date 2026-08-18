@@ -167,3 +167,22 @@ test("client: apply 返回 disposer，卸载后定时器不再触发回退", asy
   await sleep(3400);
   assert.equal(ctx._registrations.length, 0, "dispose 后回退定时器已清理");
 });
+
+test("client: loadSkills 同 session 并发去重（只发一次 list）", async () => {
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    await sleep(50);
+    return { ok: true, json: async () => ({ ok: true, value: { skills: [] } }) };
+  };
+  try {
+    const { loadSkills } = captured.__test;
+    const p1 = loadSkills("s1");
+    const p2 = loadSkills("s1");
+    assert.equal(p1, p2, "同一会话的并发请求复用同一 promise");
+    await p1;
+    assert.equal(calls, 1, "只发一次 list 请求");
+  } finally {
+    delete globalThis.fetch;
+  }
+});
