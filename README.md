@@ -33,8 +33,12 @@ cd ~/.dsh/profiles/web && pnpm install
 ## 开发
 
 ```bash
-# 单测（需要把 web profile 的依赖解析进来）
-ln -s ~/.dsh/profiles/web/node_modules node_modules
+# 单测（node_modules 必须是真实目录：ESM 不跟随目录符号链接，故对每个包建符号链接）
+mkdir -p node_modules/@deepseek-ai
+for p in cordis dsh-skill dsh-session dsh-llm dsh-settings dsh-storage-domain dsh-host-webserver; do
+  ln -sfn ~/.dsh/profiles/node_modules/@deepseek-ai/$p node_modules/@deepseek-ai/$p
+done
+ln -sfn ~/.dsh/profiles/node_modules/zod node_modules/zod
 node --test tests/     # host 半单测
 node --check lib/index.js && node --check lib/client.js
 ```
