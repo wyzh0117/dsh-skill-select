@@ -30,6 +30,13 @@ echo "== pnpm install =="
 cd "$PROFILE_DIR"
 pnpm install --prefer-offline
 
+echo "== 同步插件文件（pnpm 对已满足的 file: 依赖不会重装） =="
+INSTALLED="$PROFILE_DIR/node_modules/dsh-skill-select"
+if [ -d "$INSTALLED" ]; then
+  cp -f "$PLUGIN_DIR/lib/index.js" "$PLUGIN_DIR/lib/client.js" "$INSTALLED/lib/"
+  cp -f "$PLUGIN_DIR/dsh.plugin.json" "$PLUGIN_DIR/cordis.patch.yml" "$PLUGIN_DIR/package.json" "$PLUGIN_DIR/README.md" "$INSTALLED/"
+fi
+
 echo "== 校验 =="
 node --input-type=module - <<'NODE'
 import { readFileSync, existsSync } from "node:fs";
