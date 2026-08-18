@@ -1,0 +1,9 @@
+# dsh-skill-select bundle patch
+#
+# Mounts the host half as a profile loader row. The official CLI
+# (`dsh plugin add dsh-skill-select`) reconciles `dsh.profile.bundles` from this
+# declaration; manual installs add the same row to the profile's
+# `cordis.patch.yml` by hand — see README.md.
+- insert:
+    - id: skill-select
+      name: 'dsh-skill-select'

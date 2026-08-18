@@ -1,0 +1,16 @@
+{
+  "id": "dsh-skill-select",
+  "version": "0.1.0",
+  "main": "./lib/index.js",
+  "description": "Sidebar skill picker: list every installed skill with global/local badges, cached LLM descriptions, and /skill gesture injection into the current session composer.",
+  "engines": {
+    "dsh": ">=0.1.0-rc.6"
+  },
+  "contributes": {
+    "tools": [],
+    "skills": []
+  },
+  "client": {
+    "main": "./lib/client.js"
+  }
+}
