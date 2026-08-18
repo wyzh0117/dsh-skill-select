@@ -116,7 +116,7 @@ export default class SkillSelectService extends Service {
 
 ### 2.4 持久化（storage domain）
 
-`defineDomain({ name: "skill-select", version: 1, global: { schema, initial },
+`defineDomain({ name: "skill_select", version: 1, global: { schema, initial },
 tables: {} })`，schema（zod）：
 
 ```js

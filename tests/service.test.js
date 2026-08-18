@@ -22,7 +22,7 @@ function fakeSession(sessionId) {
 }
 
 /** 组装一个带全套 fake 服务的 cordis 上下文并挂载插件。 */
-async function bootService() {
+async function bootService(skillsOverrides = {}) {
   const ctx = new Context();
 
   const domainState = { summaries: {} };
@@ -59,6 +59,7 @@ async function bootService() {
     get: async (name) => (name === "demo-skill"
       ? { name, description: "自带简介", content: "body" }
       : undefined),
+    ...skillsOverrides,
   }));
 
   let route = null;
@@ -122,6 +123,27 @@ test("service: summarize 端到端并写入 domain 缓存", async () => {
   assert.equal(status, 200);
   assert.equal(body.value.description, "自带简介");
   assert.equal(domainState.summaries["demo-skill"], undefined, "frontmatter 简介不写缓存");
+});
+
+test("service: 无简介技能 summarize 后写入 domain 缓存（LLM 路径）", async () => {
+  const { getRoute, domainState } = await bootService({
+    list: async () => [{
+      name: "bare-skill",
+      description: "",
+      source: "user-dsh",
+      invocation: { modelInvocable: true, userInvocable: true },
+    }],
+    get: async () => ({ name: "bare-skill", description: "", content: "bare body" }),
+  });
+  const { status, body } = await callRoute(getRoute(), "/skill-select/api/summarize", { sessionId: "s1", name: "bare-skill" });
+  assert.equal(status, 200);
+  assert.equal(body.value.description, "生成的简介");
+  const record = domainState.summaries["bare-skill"];
+  assert.ok(record, "缓存已写入");
+  assert.equal(record.description, "生成的简介");
+  assert.equal(record.mode, "llm");
+  assert.match(record.contentHash, /^[0-9a-f]{16}$/);
+  assert.match(record.generatedAt, /^\d{4}-\d{2}-\d{2}T/);
 });
 
 test("service: 未知会话返回 404 session-not-found", async () => {

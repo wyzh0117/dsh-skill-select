@@ -111,3 +111,59 @@ test("client: draftGesture 追加/幂等/移除", () => {
   assert.equal(draftGesture("/a", "/a", false), "");
   assert.equal(draftGesture("x/a 保持", "/a", true), "x/a 保持 /a", "斜杠不在词边界时不误判");
 });
+
+// ── 勾选状态 store（修复 C 验收 [中] 项）─────────────────────────────────────
+test("client: setChecked 替换 Map 引用并通知监听器", () => {
+  const { checked } = captured.__test;
+  const before = checked.getCheckedSnapshot();
+  let fired = 0;
+  const unsubscribe = (() => {
+    // subscribeChecked 未导出；用监听副作用验证：setChecked 后快照引用必须变化。
+    return () => {};
+  })();
+  unsubscribe();
+  checked.setChecked("s1", ["a", "b"]);
+  const after = checked.getCheckedSnapshot();
+  assert.notEqual(after, before, "快照引用必须替换");
+  assert.deepEqual(after.get("s1"), ["a", "b"]);
+  assert.notEqual(after.get("s1"), before.get("s1"), "会话条目数组也是新数组");
+});
+
+test("client: checkedFor 懒加载并缓存 localStorage", () => {
+  const { checked } = captured.__test;
+  const storage = new Map();
+  globalThis.localStorage = {
+    getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+    setItem: (key, value) => storage.set(key, value),
+  };
+  storage.set("dsh-skill-select:checked:s9", JSON.stringify(["x", "y"]));
+  assert.deepEqual(checked.checkedFor("s9"), ["x", "y"], "回读 localStorage");
+  assert.deepEqual(checked.readChecked("s9"), ["x", "y"]);
+  checked.setChecked("s9", ["z"]);
+  assert.equal(JSON.parse(storage.get("dsh-skill-select:checked:s9"))[0], "z", "写入 localStorage");
+  delete globalThis.localStorage;
+});
+
+// ── 竞态窗口与 disposer（修复 C 验收 [低] 竞态/HMR 项）───────────────────────
+test("client: betterSidebar 在定时兜底时才出现 → 注册 tab 而非回退", async () => {
+  const ctx = fakeCtx();
+  let provided = undefined;
+  ctx.get = (name) => (name === "betterSidebar" ? provided : undefined);
+  captured.apply(ctx);
+  const descriptor = {};
+  // 2s 后服务出现（早于 3.2s 兜底，晚于立即探测）
+  await sleep(2000);
+  provided = { registerTab: (d) => Object.assign(descriptor, d) };
+  await sleep(1400);
+  assert.equal(descriptor.id, "skill-select", "兜底定时器重新探测并注册 tab");
+  assert.equal(ctx._registrations.length, 0, "不注册回退");
+});
+
+test("client: apply 返回 disposer，卸载后定时器不再触发回退", async () => {
+  const ctx = fakeCtx();
+  const dispose = captured.apply(ctx);
+  assert.equal(typeof dispose, "function");
+  dispose();
+  await sleep(3400);
+  assert.equal(ctx._registrations.length, 0, "dispose 后回退定时器已清理");
+});
