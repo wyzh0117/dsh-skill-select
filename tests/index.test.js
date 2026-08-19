@@ -2,12 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   SkillSelectApiError,
+  buildRepoIndex,
   classifySource,
   extractFallbackDescription,
   hashContent,
+  isAllowedSkill,
   isTrustedRequest,
+  mergeUsage,
   resolveList,
+  resolveRepo,
   resolveSummary,
+  scanSkillGestures,
+  toggleDefaults,
 } from "../lib/index.js";
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -147,6 +153,61 @@ test("resolveList: invocation 缺失默认双向可用", async () => {
   assert.equal(views[0].modelInvocable, true);
 });
 
+test("resolveList: 通过 agents 解析会话 scope 并传给 skills.list 与缓存回查 get", async () => {
+  // 根因回归：web 宿主把 skill-filesystem 挂进 agent preset 的 scoped 层，
+  // 不带 scope 只能读到全局层 → 列表为空。agent 对象即 scope key。
+  const agent = { id: "s1" };
+  let listOptions;
+  let getOptions;
+  const skills = {
+    list: async (opts) => {
+      listOptions = opts;
+      return [fakeSkill({ name: "cached-skill", description: "" })];
+    },
+    get: async (name, opts) => {
+      getOptions = opts;
+      return { content: "body-a" };
+    },
+  };
+  const summaries = { "cached-skill": { description: "缓存简介", contentHash: hashContent("body-a") } };
+  const agents = { get: (id) => (id === "s1" ? agent : undefined) };
+  const { skills: views } = await resolveList({
+    sessions: fakeSessions("s1"), skills, summaries, sessionId: "s1", agents,
+  });
+  assert.equal(listOptions.cwd, "/tmp/proj");
+  assert.equal(listOptions.scope, agent, "skills.list 收到会话 scope");
+  assert.equal(getOptions.scope, agent, "缓存回查 skills.get 同样收到 scope");
+  assert.equal(views[0].description, "缓存简介");
+});
+
+test("resolveList: 无 agents 服务时不传 scope（无 scope 宿主回退兼容）", async () => {
+  let listOptions;
+  const skills = {
+    list: async (opts) => {
+      listOptions = opts;
+      return [];
+    },
+    get: async () => undefined,
+  };
+  await resolveList({ sessions: fakeSessions("s1"), skills, summaries: {}, sessionId: "s1" });
+  assert.equal(listOptions.cwd, "/tmp/proj");
+  assert.equal(listOptions.scope, undefined, "scope 缺省（不携带）");
+});
+
+test("resolveList: agents 中查不到该会话时也不传 scope", async () => {
+  let listOptions;
+  const skills = {
+    list: async (opts) => {
+      listOptions = opts;
+      return [];
+    },
+    get: async () => undefined,
+  };
+  const agents = { get: () => undefined };
+  await resolveList({ sessions: fakeSessions("s1"), skills, summaries: {}, sessionId: "s1", agents });
+  assert.equal(listOptions.scope, undefined);
+});
+
 // ── resolveSummary ─────────────────────────────────────────────────────────
 
 test("resolveSummary: 技能不存在抛 skill-not-found", async () => {
@@ -163,6 +224,23 @@ test("resolveSummary: frontmatter 简介直用且不写缓存", async () => {
   assert.equal(result.mode, "frontmatter");
   assert.equal(result.fromCache, false);
   assert.equal(result.contentHash, undefined);
+});
+
+test("resolveSummary: scope 透传给 skills.get", async () => {
+  const agent = { id: "s1" };
+  let getOptions;
+  const skills = {
+    get: async (name, opts) => {
+      getOptions = opts;
+      return { name, description: "自带", content: "body" };
+    },
+  };
+  const result = await resolveSummary({
+    skills, settings: {}, llm: {}, summaries: {}, name: "a", cwd: "/tmp/proj", scope: agent,
+  });
+  assert.equal(getOptions.cwd, "/tmp/proj");
+  assert.equal(getOptions.scope, agent, "skills.get 收到会话 scope");
+  assert.equal(result.description, "自带");
 });
 
 test("resolveSummary: 缓存命中", async () => {
@@ -226,4 +304,245 @@ test("isTrustedRequest: cross-site 拒绝", () => {
     isTrustedRequest({ headers: { host: "127.0.0.1:3080", "sec-fetch-site": "cross-site" } }, []),
     false,
   );
+});
+
+// ── resolveRepo ────────────────────────────────────────────────────────────
+
+test("resolveRepo: 映射命中", () => {
+  assert.equal(resolveRepo("brainstorming"), "superpowers");
+  assert.equal(resolveRepo("writing-skills"), "superpowers");
+  assert.equal(resolveRepo("auto-empirical-research-skills"), "Auto-Empirical-Research-Skills");
+});
+
+test("resolveRepo: 嵌套布局路径推断出 repo（未映射技能）", () => {
+  assert.equal(
+    resolveRepo("custom-skill", "/home/u/.dsh/skills/my-repo/custom-skill"),
+    "my-repo",
+  );
+});
+
+test("resolveRepo: 父目录为 skills 根目录返回 null（未映射技能）", () => {
+  assert.equal(resolveRepo("custom-skill", "/home/u/.dsh/skills/custom-skill"), null);
+});
+
+test("resolveRepo: basename(dir) 不等于技能名（平铺 .md）返回 null", () => {
+  assert.equal(resolveRepo("flat-skill", "/home/u/.dsh/skills"), null);
+});
+
+test("resolveRepo: 无 dirPath 返回 null", () => {
+  assert.equal(resolveRepo("flat-skill"), null);
+});
+
+// ── scanSkillGestures ──────────────────────────────────────────────────────
+
+test("scanSkillGestures: 提取用户消息中的手势", () => {
+  const messages = [
+    { source: { kind: "user" }, content: [{ type: "text", text: "用 /a 和 /b 干活" }] },
+  ];
+  assert.deepEqual(scanSkillGestures(messages), ["a", "b"]);
+});
+
+test("scanSkillGestures: 同技能去重", () => {
+  const messages = [
+    { source: { kind: "user" }, content: [{ type: "text", text: "/a /a /b /a" }] },
+  ];
+  assert.deepEqual(scanSkillGestures(messages), ["a", "b"]);
+});
+
+test("scanSkillGestures: 词边界（斜杠前非空白不匹配、行首匹配）", () => {
+  assert.deepEqual(
+    scanSkillGestures([{ source: { kind: "user" }, content: [{ type: "text", text: "x/a 不是手势" }] }]),
+    [],
+  );
+  assert.deepEqual(
+    scanSkillGestures([{ source: { kind: "user" }, content: [{ type: "text", text: "/a" }] }]),
+    ["a"],
+  );
+});
+
+test("scanSkillGestures: 忽略非 user 消息与非 text 块", () => {
+  const messages = [
+    { source: { kind: "assistant" }, content: [{ type: "text", text: "/a" }] },
+    { source: { kind: "user" }, content: [{ type: "tool", text: "/b" }] },
+    { source: { kind: "user" }, content: [{ type: "text", text: "/c" }] },
+  ];
+  assert.deepEqual(scanSkillGestures(messages), ["c"]);
+});
+
+test("scanSkillGestures: 消息块字段为 content；仅有 blocks 字段时不误扫", () => {
+  // 生产事实：LLM 消息的块数组在 `content` 字段（dsh-tool-skill 同款）。
+  const legacy = [{ source: { kind: "user" }, blocks: [{ type: "text", text: "/a" }] }];
+  assert.deepEqual(scanSkillGestures(legacy), []);
+});
+
+test("scanSkillGestures: 空 / undefined messages 返回空数组", () => {
+  assert.deepEqual(scanSkillGestures(undefined), []);
+  assert.deepEqual(scanSkillGestures([]), []);
+});
+
+// ── mergeUsage ─────────────────────────────────────────────────────────────
+
+test("mergeUsage: 空表新增", () => {
+  const next = mergeUsage({}, ["a", "b"], "t1");
+  assert.deepEqual(next, {
+    a: { count: 1, lastUsedAt: "t1" },
+    b: { count: 1, lastUsedAt: "t1" },
+  });
+});
+
+test("mergeUsage: 已有计数 +1 且不改变其它键", () => {
+  const usage = {
+    a: { count: 1, lastUsedAt: "t0" },
+    b: { count: 5, lastUsedAt: "t0" },
+  };
+  const next = mergeUsage(usage, ["a"], "t1");
+  assert.equal(next.a.count, 2);
+  assert.equal(next.a.lastUsedAt, "t1");
+  assert.equal(next.b.count, 5);
+  assert.equal(next.b.lastUsedAt, "t0");
+});
+
+test("mergeUsage: 返回新对象引用、输入对象不被 mutate", () => {
+  const usage = { a: { count: 1, lastUsedAt: "t0" } };
+  const next = mergeUsage(usage, ["a"], "t1");
+  assert.notEqual(next, usage);
+  assert.equal(usage.a.count, 1);
+  assert.equal(usage.a.lastUsedAt, "t0");
+});
+
+// ── resolveList 新增语义 ────────────────────────────────────────────────────
+
+test("resolveList: 嵌套技能按 resourceBase.path 拿到 repo", async () => {
+  const skills = {
+    list: async () => [fakeSkill({ name: "custom-skill", description: "有简介" })],
+    get: async () => ({
+      content: "body",
+      resourceBase: { kind: "directory", path: "/home/u/.dsh/skills/my-repo/custom-skill" },
+    }),
+  };
+  const { skills: views } = await resolveList({
+    sessions: fakeSessions("s1"), skills, summaries: {}, sessionId: "s1",
+  });
+  assert.equal(views[0].repo, "my-repo");
+});
+
+test("resolveList: 映射命中的技能不触发 skills.get，仅未映射技能触发", async () => {
+  const getCalls = [];
+  const skills = {
+    list: async () => [
+      fakeSkill({ name: "brainstorming", description: "" }),
+      fakeSkill({ name: "other-skill", description: "" }),
+    ],
+    get: async (name) => {
+      getCalls.push(name);
+      return undefined;
+    },
+  };
+  const { skills: views } = await resolveList({
+    sessions: fakeSessions("s1"), skills, summaries: {}, sessionId: "s1",
+  });
+  assert.deepEqual(getCalls, ["other-skill"]);
+  const byName = Object.fromEntries(views.map((v) => [v.name, v]));
+  assert.equal(byName.brainstorming.repo, "superpowers");
+});
+
+test("resolveList: usage 映射到 view.usage（无记录为 0）", async () => {
+  const skills = {
+    list: async () => [
+      fakeSkill({ name: "usage-skill", description: "有简介" }),
+      fakeSkill({ name: "usage-zero", description: "有简介" }),
+    ],
+    get: async () => undefined,
+  };
+  const { skills: views } = await resolveList({
+    sessions: fakeSessions("s1"),
+    skills,
+    summaries: {},
+    usage: { "usage-skill": { count: 7, lastUsedAt: "t1" } },
+    sessionId: "s1",
+  });
+  const byName = Object.fromEntries(views.map((v) => [v.name, v]));
+  assert.equal(byName["usage-skill"].usage, 7);
+  assert.equal(byName["usage-zero"].usage, 0);
+});
+
+test("resolveList: 无 usage 参数时默认 0", async () => {
+  const skills = {
+    list: async () => [fakeSkill({ name: "no-usage-skill", description: "有简介" })],
+    get: async () => undefined,
+  };
+  const { skills: views } = await resolveList({
+    sessions: fakeSessions("s1"), skills, summaries: {}, sessionId: "s1",
+  });
+  assert.equal(views[0].usage, 0);
+});
+
+test("resolveList: repo 推断 get 失败时 repo 为 null 且不抛错", async () => {
+  const skills = {
+    list: async () => [fakeSkill({ name: "x-skill", description: "有简介" })],
+    get: async () => { throw new Error("get down"); },
+  };
+  const { skills: views } = await resolveList({
+    sessions: fakeSessions("s1"), skills, summaries: {}, sessionId: "s1",
+  });
+  assert.equal(views[0].repo, null);
+});
+
+// ── v4：默认启动名单 / 守卫判定 / repo 索引 ───────────────────────────────
+
+test("toggleDefaults: 加入去重、移除、不改输入", () => {
+  const base = ["a", "b"];
+  assert.deepEqual(toggleDefaults(base, "b", true), ["a", "b"]);
+  assert.deepEqual(toggleDefaults(base, "c", true), ["a", "b", "c"]);
+  assert.deepEqual(toggleDefaults(base, "a", false), ["b"]);
+  assert.deepEqual(base, ["a", "b"], "输入不被 mutate");
+  assert.deepEqual(toggleDefaults(undefined, "x", true), ["x"]);
+});
+
+test("isAllowedSkill: 默认名单 ∪ 会话勾选", () => {
+  assert.equal(isAllowedSkill(["a"], [], "a"), true);
+  assert.equal(isAllowedSkill([], ["b"], "b"), true);
+  assert.equal(isAllowedSkill(["a"], ["b"], "c"), false);
+  assert.equal(isAllowedSkill([], undefined, "c"), false);
+});
+
+test("buildRepoIndex: 分组、小写键、忽略 null、保留显示名", () => {
+  const repoByName = new Map([
+    ["a-skill", "SuperPowers"],
+    ["b-skill", "SuperPowers"],
+    ["c-skill", null],
+    ["d-skill", ""],
+  ]);
+  const index = buildRepoIndex(repoByName, [
+    { name: "a-skill" }, { name: "b-skill" }, { name: "c-skill" }, { name: "d-skill" },
+  ]);
+  assert.equal(index.size, 1);
+  assert.deepEqual(index.get("superpowers"), { repo: "SuperPowers", members: ["a-skill", "b-skill"] });
+});
+
+test("resolveList: defaults 参数映射 defaultStart", async () => {
+  const skills = {
+    list: async () => [
+      fakeSkill({ name: "on-skill", description: "x" }),
+      fakeSkill({ name: "off-skill", description: "x" }),
+    ],
+    get: async () => undefined,
+  };
+  const { skills: views } = await resolveList({
+    sessions: fakeSessions("s1"), skills, summaries: {}, defaults: ["on-skill"], sessionId: "s1",
+  });
+  const byName = Object.fromEntries(views.map((v) => [v.name, v]));
+  assert.equal(byName["on-skill"].defaultStart, true);
+  assert.equal(byName["off-skill"].defaultStart, false);
+});
+
+test("resolveList: 未传 defaults 时全部 defaultStart=false", async () => {
+  const skills = {
+    list: async () => [fakeSkill({ name: "a-skill", description: "x" })],
+    get: async () => undefined,
+  };
+  const { skills: views } = await resolveList({
+    sessions: fakeSessions("s1"), skills, summaries: {}, sessionId: "s1",
+  });
+  assert.equal(views[0].defaultStart, false);
 });

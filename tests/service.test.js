@@ -22,14 +22,20 @@ function fakeSession(sessionId) {
 }
 
 /** 组装一个带全套 fake 服务的 cordis 上下文并挂载插件。 */
-async function bootService(skillsOverrides = {}) {
+async function bootService(skillsOverrides = {}, options = {}) {
   const ctx = new Context();
 
   const domainState = { summaries: {} };
   const domain = {
     global: {
       get: () => domainState,
-      set: async (next) => Object.assign(domainState, next),
+      set: async (next) => {
+        // options.failUsageSet：usage 写入时抛错（验证计数失败不阻断 agent 流程）。
+        if (options.failUsageSet === true && next.usage !== undefined && domainState.usage !== next.usage) {
+          throw new Error("simulated domain write failure");
+        }
+        Object.assign(domainState, next);
+      },
     },
     close: () => {},
   };
@@ -46,21 +52,39 @@ async function bootService(skillsOverrides = {}) {
       },
     }),
   });
-  ctx.provide("skills", fakeSkills({
-    list: async () => [
-      {
-        name: "demo-skill",
-        description: "自带简介",
-        whenToUse: undefined,
-        source: "user-dsh",
-        invocation: { modelInvocable: true, userInvocable: true },
-      },
-    ],
-    get: async (name) => (name === "demo-skill"
-      ? { name, description: "自带简介", content: "body" }
-      : undefined),
+
+  // 记录 skills.list/get 收到的最近一次 options，供 scope 透传断言。
+  const skillCalls = { list: undefined, get: undefined };
+  const baseSkills = fakeSkills({
+    list: async (opts) => {
+      skillCalls.list = opts;
+      return [
+        {
+          name: "demo-skill",
+          description: "自带简介",
+          whenToUse: undefined,
+          source: "user-dsh",
+          invocation: { modelInvocable: true, userInvocable: true },
+        },
+      ];
+    },
+    get: async (name, opts) => {
+      skillCalls.get = opts;
+      return name === "demo-skill"
+        ? { name, description: "自带简介", content: "body", provider: "filesystem" }
+        : undefined;
+    },
+  });
+  ctx.provide("skills", {
+    list: baseSkills.list,
+    get: baseSkills.get,
     ...skillsOverrides,
-  }));
+  });
+
+  if (options.withAgents !== false) {
+    const agent = { id: "s1" };
+    ctx.provide("agents", { get: (id) => (id === "s1" ? agent : undefined) });
+  }
 
   let route = null;
   ctx.provide("webServer", {
@@ -71,10 +95,19 @@ async function bootService(skillsOverrides = {}) {
   });
   ctx.provide("webRuntime", { trustedHosts: [] });
 
+  // tools：捕获 guard（skill 工具守卫），其余方法不需要。
+  let capturedGuard = null;
+  ctx.provide("tools", {
+    guard: (fn) => {
+      capturedGuard = fn;
+      return () => {};
+    },
+  });
+
   const fiber = ctx.plugin(SkillSelectService);
   await fiber;
   assert.equal(fiber.state, 2, "fiber 应处于 ACTIVE");
-  return { ctx, domainState, getRoute: () => route, isClosed: () => closed };
+  return { ctx, domainState, getRoute: () => route, isClosed: () => closed, skillCalls, getGuard: () => capturedGuard };
 }
 
 /** 用假 req/res 调一次已注册路由。 */
@@ -115,6 +148,29 @@ test("service: list 端到端（围栏→dispatch→包络）", async () => {
   assert.equal(body.value.skills.length, 1);
   assert.equal(body.value.skills[0].name, "demo-skill");
   assert.equal(body.value.skills[0].source, "user");
+});
+
+test("service: list 通过 ctx.agents 把会话 scope 传给 skills.list（web 宿主根因回归）", async () => {
+  const { getRoute, skillCalls } = await bootService();
+  const { status } = await callRoute(getRoute(), "/skill-select/api/list", { sessionId: "s1" });
+  assert.equal(status, 200);
+  assert.ok(skillCalls.list, "skills.list 被调用");
+  assert.equal(skillCalls.list.cwd, "/tmp/proj");
+  assert.equal(skillCalls.list.scope?.id, "s1", "scope 为会话对应 agent");
+});
+
+test("service: 无 agents 服务时 list 不携带 scope（回退兼容）", async () => {
+  const { getRoute, skillCalls } = await bootService({}, { withAgents: false });
+  const { status } = await callRoute(getRoute(), "/skill-select/api/list", { sessionId: "s1" });
+  assert.equal(status, 200);
+  assert.equal(skillCalls.list.scope, undefined, "未提供 agents 时 scope 缺省");
+});
+
+test("service: summarize 同样携带会话 scope 调用 skills.get", async () => {
+  const { getRoute, skillCalls } = await bootService();
+  const { status } = await callRoute(getRoute(), "/skill-select/api/summarize", { sessionId: "s1", name: "demo-skill" });
+  assert.equal(status, 200);
+  assert.equal(skillCalls.get.scope?.id, "s1", "skills.get 收到 scope");
 });
 
 test("service: summarize 端到端并写入 domain 缓存", async () => {
@@ -172,4 +228,205 @@ test("service: 非可信 Host 返回 403", async () => {
   const { status, body } = await callRoute(getRoute(), "/skill-select/api/list", { sessionId: "s1" }, { host: "evil.example.com" });
   assert.equal(status, 403);
   assert.equal(body.error.code, "forbidden");
+});
+
+// ── agent/pre-step 调用计数观察者（真实 cordis waterfall 语义）──────────────
+
+/** 与 dsh-agent-loop 相同的派发约定：waterfall(name, payload, 内层 next)。 */
+function dispatchPreStep(ctx, messages) {
+  return ctx.events.waterfall("agent/pre-step", {
+    agent: { id: "s1" },
+    signal: undefined,
+    messages,
+  }, async () => ({ kind: "enter", messages: [] }));
+}
+
+const flushUsage = () => new Promise((resolve) => setTimeout(resolve, 30));
+
+test("service: agent/pre-step 观察者统计真实 /skill 手势调用并写入 domain", async () => {
+  const { ctx, domainState } = await bootService();
+
+  // 同消息同技能去重、assistant 消息不计 → 只 +1
+  const decision = await dispatchPreStep(ctx, [
+    { source: { kind: "user" }, content: [{ type: "text", text: "请用 /demo-skill 和 /demo-skill 干活" }] },
+    { source: { kind: "assistant" }, content: [{ type: "text", text: "/demo-skill" }] },
+  ]);
+  assert.equal(decision.kind, "enter", "decision 原样透传");
+  await flushUsage();
+  assert.equal(domainState.usage?.["demo-skill"]?.count, 1);
+
+  // 第二步累计 +1
+  await dispatchPreStep(ctx, [
+    { source: { kind: "user" }, content: [{ type: "text", text: "/demo-skill 继续" }] },
+  ]);
+  await flushUsage();
+  assert.equal(domainState.usage?.["demo-skill"]?.count, 2);
+
+  // 非 user 来源不计数
+  await dispatchPreStep(ctx, [
+    { source: { kind: "system" }, content: [{ type: "text", text: "/demo-skill" }] },
+  ]);
+  await flushUsage();
+  assert.equal(domainState.usage?.["demo-skill"]?.count, 2);
+  assert.match(domainState.usage?.["demo-skill"]?.lastUsedAt, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+// ── v4：set-default / set-checked / guard / repo 令牌展开 / 默认注入 ─────────
+
+const agentA = { id: "s1", session: { id: "s1", header: { cwd: "/tmp/proj" } } };
+
+function dispatchPreStepWith(ctx, messages, agent = agentA) {
+  return ctx.events.waterfall("agent/pre-step", { agent, signal: undefined, messages }, async () => ({ kind: "enter", messages: [] }));
+}
+
+function userMsg(text) {
+  return { source: { kind: "user" }, content: [{ type: "text", text }] };
+}
+
+test("service: set-default 持久化到 domain 且 list 返回 defaultStart", async () => {
+  const { getRoute, domainState } = await bootService();
+  let res = await callRoute(getRoute(), "/skill-select/api/set-default", { name: "demo-skill", on: true });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.value, { name: "demo-skill", defaultStart: true });
+  assert.deepEqual(domainState.defaults, ["demo-skill"]);
+
+  res = await callRoute(getRoute(), "/skill-select/api/list", { sessionId: "s1" });
+  assert.equal(res.body.value.skills[0].defaultStart, true);
+
+  res = await callRoute(getRoute(), "/skill-select/api/set-default", { name: "demo-skill", on: false });
+  assert.deepEqual(domainState.defaults, []);
+  res = await callRoute(getRoute(), "/skill-select/api/list", { sessionId: "s1" });
+  assert.equal(res.body.value.skills[0].defaultStart, false);
+});
+
+test("service: set-default on 非 boolean → bad-request", async () => {
+  const { getRoute } = await bootService();
+  const { status, body } = await callRoute(getRoute(), "/skill-select/api/set-default", { name: "demo-skill", on: "yes" });
+  assert.equal(status, 400);
+  assert.equal(body.error.code, "bad-request");
+});
+
+test("service: set-checked 写入内存镜像供 guard 判定；校验会话与数组", async () => {
+  const { getRoute, getGuard } = await bootService();
+  const guard = getGuard();
+  assert.equal(typeof guard, "function", "guard 已注册");
+
+  // 会话不存在 → 404
+  let res = await callRoute(getRoute(), "/skill-select/api/set-checked", { sessionId: "nope", skills: ["a"] });
+  assert.equal(res.status, 404);
+
+  // skills 非数组 → 400
+  res = await callRoute(getRoute(), "/skill-select/api/set-checked", { sessionId: "s1", skills: "a" });
+  assert.equal(res.status, 400);
+
+  // 合法写入
+  res = await callRoute(getRoute(), "/skill-select/api/set-checked", { sessionId: "s1", skills: ["a", "a", "b"] });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.value, { sessionId: "s1", count: 2 });
+});
+
+test("service: guard 放行默认名单/会话勾选，拒绝未选择技能", async () => {
+  const { getRoute, getGuard } = await bootService();
+  const guard = getGuard();
+  const exec = (name, overrides = {}) => ({
+    name: "skill",
+    arguments: { name },
+    agent: agentA,
+    ...overrides,
+  });
+
+  // 未允许 → 拒绝并给出提示
+  const reason = guard(exec("brainstorming"));
+  assert.equal(typeof reason, "string");
+  assert.match(reason, /not enabled/);
+
+  // set-default 后 → 放行
+  await callRoute(getRoute(), "/skill-select/api/set-default", { name: "brainstorming", on: true });
+  assert.equal(guard(exec("brainstorming")), undefined);
+
+  // set-checked 后 → 放行
+  await callRoute(getRoute(), "/skill-select/api/set-checked", { sessionId: "s1", skills: ["writing-plans"] });
+  assert.equal(guard(exec("writing-plans")), undefined);
+
+  // 非 skill 工具、非法参数一律放行
+  assert.equal(guard({ name: "bash", arguments: {}, agent: agentA }), undefined);
+  assert.equal(guard(exec("Not A Skill")), undefined);
+  assert.equal(guard({ name: "skill", arguments: "raw", agent: agentA }), undefined);
+
+  // guard 内部异常不逃逸（无 agent/session 的场景）
+  assert.equal(guard({ name: "skill", arguments: { name: "brainstorming" } }), undefined);
+});
+
+test("service: repo 令牌 /superpowers 展开为单条注入行并计数", async () => {
+  const members = [
+    { name: "brainstorming", description: "b", source: "user-dsh", invocation: { modelInvocable: true, userInvocable: true } },
+    { name: "writing-plans", description: "w", source: "user-dsh", invocation: { modelInvocable: true, userInvocable: true } },
+  ];
+  const { ctx, domainState } = await bootService({
+    list: async () => members,
+    get: async (name) => ({ name, description: "d", content: `BODY-${name}`, provider: "filesystem" }),
+  });
+  const decision = await dispatchPreStepWith(ctx, [userMsg("请 /superpowers 干活")]);
+  assert.equal(decision.kind, "enter");
+  const injected = decision.messages.filter((m) => m.source?.kind === "skill-invocation");
+  assert.equal(injected.length, 1, "repo 令牌 → 单条注入行");
+  assert.equal(injected[0].source.name, "superpowers", "注入行标签 = repo 显示名");
+  assert.match(injected[0].content[0].text, /BODY-brainstorming/);
+  assert.match(injected[0].content[0].text, /BODY-writing-plans/);
+  await flushUsage();
+  assert.equal(domainState.usage?.["brainstorming"]?.count, 1);
+  assert.equal(domainState.usage?.["writing-plans"]?.count, 1);
+});
+
+test("service: 真实技能手势不按 repo 展开、不重复注入", async () => {
+  const members = [
+    { name: "brainstorming", description: "b", source: "user-dsh", invocation: { modelInvocable: true, userInvocable: true } },
+  ];
+  const { ctx, domainState } = await bootService({
+    list: async () => members,
+    get: async (name) => ({ name, description: "d", content: `BODY-${name}`, provider: "filesystem" }),
+  });
+  const decision = await dispatchPreStepWith(ctx, [userMsg("请 /brainstorming 干活")]);
+  assert.equal(decision.kind, "enter");
+  const injected = decision.messages.filter((m) => m.source?.kind === "skill-invocation");
+  assert.equal(injected.length, 0, "真实技能手势由 dsh-tool-skill 注入，本插件不注入");
+  await flushUsage();
+  assert.equal(domainState.usage?.["brainstorming"]?.count, 1);
+});
+
+test("service: 默认技能每会话注入一次且计数一次", async () => {
+  const { ctx, domainState, getRoute } = await bootService();
+  await callRoute(getRoute(), "/skill-select/api/set-default", { name: "demo-skill", on: true });
+
+  const first = await dispatchPreStepWith(ctx, [userMsg("第一条消息")]);
+  const injectedFirst = first.messages.filter((m) => m.source?.kind === "skill-invocation");
+  assert.equal(injectedFirst.length, 1);
+  assert.equal(injectedFirst[0].source.name, "demo-skill");
+
+  // 同一 agent 再发 → 不再注入
+  const second = await dispatchPreStepWith(ctx, [userMsg("第二条消息")]);
+  const injectedSecond = second.messages.filter((m) => m.source?.kind === "skill-invocation");
+  assert.equal(injectedSecond.length, 0, "同一会话不重复注入");
+
+  await flushUsage();
+  assert.equal(domainState.usage?.["demo-skill"]?.count, 1);
+
+  // 新 agent（新会话）→ 再次注入
+  const agentB = { id: "s2", session: { id: "s2", header: { cwd: "/tmp/proj" } } };
+  const third = await dispatchPreStepWith(ctx, [userMsg("新会话")], agentB);
+  const injectedThird = third.messages.filter((m) => m.source?.kind === "skill-invocation");
+  assert.equal(injectedThird.length, 1, "新会话再次注入默认技能");
+});
+
+test("service: reject decision 原样透传且无注入", async () => {
+  const { ctx } = await bootService();
+  const inner = async () => ({ kind: "reject", messages: [] });
+  const decision = await ctx.events.waterfall("agent/pre-step", { agent: agentA, signal: undefined, messages: [userMsg("/demo-skill")] }, inner);
+  assert.equal(decision.kind, "reject");
+});
+
+test("service: 计数失败（domain 写入抛错）不阻断 agent 流程", async () => {
+  const { ctx } = await bootService({}, { failUsageSet: true });
+  const decision = await dispatchPreStepWith(ctx, [userMsg("/demo-skill 计数")]);
+  assert.equal(decision.kind, "enter", "计数写入失败时 decision 仍原样返回");
 });
