@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   SkillSelectApiError,
   buildRepoIndex,
@@ -15,6 +18,7 @@ import {
   resolveList,
   resolveRepo,
   resolveSummary,
+  runUpdate,
   scanExternalGestures,
   scanSkillGestures,
   splitFrontmatter,
@@ -638,4 +642,35 @@ test("parseOriginMarker reads source/commit/version", () => {
   const txt = "source=https://github.com/obra/superpowers.git\ncommit=b36e082\nversion=v6.3.0\ninstalled=2026-08-14\n";
   assert.deepEqual(parseOriginMarker(txt), { source: "https://github.com/obra/superpowers.git", commit: "b36e082", version: "v6.3.0" });
   assert.equal(parseOriginMarker("no source here"), null);
+});
+
+// ── runUpdate ─────────────────────────────────────────────────────────────
+
+test("runUpdate: 坏 .git → failed；无 .git 无标记 → skipped；非法 source → failed", async () => {
+  // 全部在 node:os tmpdir 下创建，测完清理；不发起任何真实网络克隆。
+  const base = await mkdtemp(join(tmpdir(), "skill-select-test-"));
+  try {
+    const root = join(base, "root");
+    // 无 .git、无来源标记的普通目录 → skipped。
+    await mkdir(join(root, "plain"), { recursive: true });
+    // 坏 .git：.git 目录存在但非有效仓库，git rev-parse/pull 必失败 → failed。
+    await mkdir(join(root, "broken", ".git"), { recursive: true });
+    // source 非合法协议前缀（以 `-` 开头会被 git 当作选项）→ 克隆前校验拒绝。
+    await mkdir(join(root, "evil"), { recursive: true });
+    await writeFile(
+      join(root, "evil", ".superpowers-origin.txt"),
+      "source=-upload-pack=git@example.com:repo.git\n",
+      "utf8",
+    );
+    const items = await runUpdate([{ id: "test", path: root }]);
+    const byName = Object.fromEntries(items.map((i) => [i.name, i]));
+    assert.equal(byName.plain.status, "skipped");
+    assert.equal(byName.plain.reason, "no update source");
+    assert.equal(byName.broken.status, "failed");
+    assert.ok(typeof byName.broken.reason === "string" && byName.broken.reason !== "", "坏 .git 必须带 reason");
+    assert.equal(byName.evil.status, "failed");
+    assert.equal(byName.evil.reason, 'invalid origin source "-upload-pack=git@example.com:repo.git"');
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });
