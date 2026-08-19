@@ -181,9 +181,9 @@ test("client: composeDraft 重算草稿（追加/覆盖/取消）", () => {
 test("client: repoCheckState 三态派生", () => {
   const { repoCheckState } = captured.__test;
   const skills = [
-    { name: "a", repo: "superpowers" },
-    { name: "b", repo: "superpowers" },
-    { name: "c" },
+    { id: "a", name: "a", repo: "superpowers" },
+    { id: "b", name: "b", repo: "superpowers" },
+    { id: "c", name: "c" },
   ];
   assert.equal(repoCheckState(skills, "superpowers", []), "none");
   assert.equal(repoCheckState(skills, "superpowers", ["a"]), "some");
@@ -347,4 +347,10 @@ test("client: loadSkills 同 session 并发去重（只发一次 list；成功�
   } finally {
     delete globalThis.fetch;
   }
+});
+
+test("repoCheckState normalizes null repo to empty", () => {
+  const skills = [{ id: "a", name: "a", repo: null }];
+  assert.equal(captured.__test.repoCheckState(skills, "", ["a"]), "all");
+  assert.equal(captured.__test.repoCheckState(skills, "", []), "none");
 });
