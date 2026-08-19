@@ -45,8 +45,9 @@
     目录（排除各自内置），以复合身份 `agent:name` 展示，重名全列、可分别勾选；
     勾选后在草稿写入 `/name@agent` 带来源令牌，发送时由插件识别并**直接注入**
     （不进 `ctx.skills`，见 §2.5）；Auto-start 同样支持。
-11. **一键更新**：对 git 仓库型技能 `git pull`、对带来源标记的技能按 URL 重拉
-    （§2.6），结果在面板内以精简摘要展示，**不新建会话**。
+11. **一键更新**：对 git 仓库型技能 `git pull`、对带**单个技能目录内**来源标记的
+    技能按 URL 重拉（根级整组标记不重拉，报 skipped，§2.6），结果在面板内以精简
+    摘要展示，**不新建会话**。
 12. **UI 一致性**：repo 组头名用与技能名一致的等宽字体且略大（13px vs 12.5px）；
     repo 展开后组内技能行缩进体现层级；修正 “Other” 组计数与三态。
 
@@ -54,8 +55,8 @@
 - 不修改 DSH 核心包、不修改任何 skill 文件、不新增 slash 命令。
 - 外部 agent 技能**不注册**进 `ctx.skills`：不进模型 `available_skills` 目录、
   不能经 `skill` 工具按名调用（与「勾选后注入即可用」的模型一致）。
-- 更新只处理 git 仓库与带来源标记的技能；无更新源的手工技能标记为 `skipped`，
-  不做内容快照/回滚。
+- 更新只处理 git 仓库与带（单个技能目录内）来源标记的技能；无更新源的手工技能标记为
+  `skipped`，不做内容快照/回滚。
 - 不实现 skill 的下载/安装管理；不展开 AERS 的 vendored 子技能。
 - 不做多语言完整 i18n（英文 UI）；不持久化排序/折叠偏好。
 - 不在会话历史中“撤销”已注入的 skill；不回填安装前历史调用量；不统计模型
@@ -228,12 +229,18 @@ interface ExternalSkillView {
 ### 2.6 一键更新（host + client）
 
 **Host `update` API**（`node:child_process` 的 `execFile("git", ...)`）：
-- 扫描范围：dsh 全局（`~/.dsh/skills`）、项目（`.dsh/skills`）、三个 agent 技能根
-  （§2.5），以及 `~/.agents/skills`（user-agents）中的技能目录。
+- 扫描范围：dsh 全局（`~/.dsh/skills`）、三个 agent 技能根（§2.5），以及
+  `~/.agents/skills`（user-agents）中的技能目录。`update` 请求无 session，项目
+  `.dsh/skills` **不在扫描范围**（`source` 无 `dsh-project`）。
 - 每项判定：有 `.git` → `git -C <dir> pull --ff-only`，记 before/after HEAD 与
-  `git -C <dir> log --oneline old..new`；无 `.git` 但有来源标记（如
-  `~/.grok/skills/.superpowers-origin.txt` 的 `source=`/`commit=`/`version=`）→
+  `git -C <dir> log --oneline old..new`（HEAD 不变 → `skipped`，reason
+  "already up to date"）；无 `.git` 但有**单个技能目录内**的来源标记
+  （`<skillDir>/.superpowers-origin.txt` 的 `source=`/`commit=`/`version=`）→
   按 URL 重新拉取到临时目录后替换，记版本/commit 差；否则 → `skipped`。
+- **根级来源标记不自动重拉**：`~/.grok/skills` 根上的 `.superpowers-origin.txt`
+  （整组技能集，如 grok 的 superpowers）**不**作为 re-fetch 来源——这类技能报
+  `skipped` 并带原因，因为按整组标记逐技能重拉会覆盖每个技能目录，属破坏性操作；
+  仅 per-skill 标记才触发重拉。
 - 返回：`{ items: [{ id, name, source, status: "updated"|"skipped"|"failed",
   before, after, changes: string[] }] }`。任何 git 失败不抛断整体，单条记 `failed`
   带原因。
@@ -242,9 +249,9 @@ interface ExternalSkillView {
 面板内摘要区（每项：技能名 + 状态徽标 + 变更摘要行；`skipped`/`failed` 附说明）。
 **不新建会话**（按用户选择）。
 
-> 现实提示：当前仅 `~/.hermes/skills/xiaohongshu-skills` 为 git 仓库、grok 的
-> superpowers 有来源标记；其余技能会显示“无更新源/跳过”。机制已就位，将来以
-> git/来源方式安装即自动可更新。
+> 现实提示：当前仅 `~/.hermes/skills/xiaohongshu-skills` 为 git 仓库；grok 的
+> superpowers 只有整组根级来源标记，更新时被报为 `skipped`（不重拉）；其余技能
+> 显示“无更新源/跳过”。机制已就位，将来以 git/per-skill 来源方式安装即自动可更新。
 
 ### 2.7 回退 UI：活动栏 + VSCode 式右滑面板
 
@@ -306,7 +313,7 @@ interface SkillView {
 interface UpdateItem {
   id: string;              // 技能名或复合 id
   name: string;
-  source: string;          // dsh-global | dsh-project | codex | grok | hermes | agents
+  source: string;          // dsh-global | agents | codex | grok | hermes（无 dsh-project：update 无会话）
   status: "updated" | "skipped" | "failed";
   before?: string;         // 旧 HEAD / 旧 commit / 旧 version
   after?: string;          // 新 HEAD / 新 commit / 新 version

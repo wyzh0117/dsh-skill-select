@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFile as execFileCb } from "node:child_process";
+import { promisify } from "node:util";
 import {
   SkillSelectApiError,
   buildRepoIndex,
@@ -670,6 +672,59 @@ test("runUpdate: 坏 .git → failed；无 .git 无标记 → skipped；非法 s
     assert.ok(typeof byName.broken.reason === "string" && byName.broken.reason !== "", "坏 .git 必须带 reason");
     assert.equal(byName.evil.status, "failed");
     assert.equal(byName.evil.reason, 'invalid origin source "-upload-pack=git@example.com:repo.git"');
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("runUpdate: git 已最新 → skipped(already up to date)；有新提交 → updated；agents 根 id 带前缀", async () => {
+  // 真实本地 git 仓库（无网络）：克隆 origin 后 pull 无变更 → skipped；
+  // origin 前进一个提交再 pull → updated 且 changes 含新提交行。
+  const exec = promisify(execFileCb);
+  const git = (args) => exec("git", args, { timeout: 30000 });
+  const ident = ["-c", "user.name=T", "-c", "user.email=t@e.c"];
+  const base = await mkdtemp(join(tmpdir(), "skill-select-test-"));
+  try {
+    const origin = join(base, "origin");
+    await mkdir(origin, { recursive: true });
+    await git(["init", "-b", "main", origin]);
+    await writeFile(join(origin, "a.txt"), "v1\n", "utf8");
+    await git([...ident, "-C", origin, "add", "."]);
+    await git([...ident, "-C", origin, "commit", "-m", "init"]);
+
+    // dsh-global 根：克隆 repo（与 origin 同步）→ pull 无变更 → skipped，裸名 id。
+    const globalRoot = join(base, "global");
+    await mkdir(globalRoot, { recursive: true });
+    const repo = join(globalRoot, "repo");
+    await git(["clone", origin, repo]);
+
+    // agents 根：普通无来源目录 → skipped，但 id 必须带 agents: 前缀（不与 dsh-global 冲突）。
+    const agentsRoot = join(base, "agents");
+    await mkdir(join(agentsRoot, "plain"), { recursive: true });
+
+    const first = await runUpdate([
+      { id: "dsh-global", path: globalRoot },
+      { id: "agents", path: agentsRoot },
+    ]);
+    const globalRepo = first.find((i) => i.source === "dsh-global" && i.name === "repo");
+    assert.equal(globalRepo.id, "repo", "dsh-global 保持裸名 id");
+    assert.equal(globalRepo.status, "skipped");
+    assert.equal(globalRepo.reason, "already up to date");
+    assert.deepEqual(globalRepo.changes, [], "skipped 时 changes 为空");
+    const agentsPlain = first.find((i) => i.source === "agents" && i.name === "plain");
+    assert.equal(agentsPlain.id, "agents:plain", "agents 根 id 带 agents: 前缀");
+    assert.equal(agentsPlain.status, "skipped");
+
+    // origin 前进一个提交 → 再次 pull → updated，changes 含新提交摘要行。
+    await writeFile(join(origin, "a.txt"), "v2\n", "utf8");
+    await git([...ident, "-C", origin, "add", "."]);
+    await git([...ident, "-C", origin, "commit", "-m", "second"]);
+    const second = await runUpdate([{ id: "dsh-global", path: globalRoot }]);
+    const updated = second.find((i) => i.name === "repo");
+    assert.equal(updated.status, "updated");
+    assert.ok(updated.before !== updated.after, "before/after HEAD 应不同");
+    assert.equal(updated.changes.length, 1);
+    assert.match(updated.changes[0], /second/);
   } finally {
     await rm(base, { recursive: true, force: true });
   }

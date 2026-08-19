@@ -306,6 +306,24 @@ test("service: set-default on 非 boolean → bad-request", async () => {
   assert.equal(body.error.code, "bad-request");
 });
 
+test("service: set-default name 必须是 kebab 技能名或 agent:name 复合 id", async () => {
+  const { getRoute, domainState } = await bootService();
+
+  // 合法：kebab 技能名与 agent:name 复合 id。
+  let res = await callRoute(getRoute(), "/skill-select/api/set-default", { name: "demo-skill", on: true });
+  assert.equal(res.status, 200);
+  res = await callRoute(getRoute(), "/skill-select/api/set-default", { name: "grok:ego-browser", on: true });
+  assert.equal(res.status, 200);
+  assert.deepEqual(domainState.defaults, ["demo-skill", "grok:ego-browser"]);
+
+  // 非法格式（大小写/空白/下划线/空复合段/多余冒号）→ 400 bad-request。
+  for (const bad of ["Not A Skill", "UPPER", "demo_skill", "grok:", "a:b:c", "grok:ego browser", "a b:c"]) {
+    res = await callRoute(getRoute(), "/skill-select/api/set-default", { name: bad, on: true });
+    assert.equal(res.status, 400, `name=${JSON.stringify(bad)} 应 400`);
+    assert.equal(res.body.error.code, "bad-request");
+  }
+});
+
 test("service: set-checked 写入内存镜像供 guard 判定；校验会话与数组", async () => {
   const { getRoute, getGuard } = await bootService();
   const guard = getGuard();

@@ -25,9 +25,10 @@ DSH Web 插件：侧边栏 skill 选择器（英文 UI，side card 风格）。
   **Codex / Grok / Hermes 来源徽标**；不同 agent 下的重名技能**全部列出、可分别勾选**；
 - 勾选外部技能后草稿写入带来源令牌 **`/name@agent`**（如 `/ego-browser@grok`），发送时
   插件注入**该来源**的技能内容（DSH 技能仍用普通 `/name`）；
-- 面板工具栏 **Update** 按钮一键更新全部技能：git 仓库型 `git pull`、带 per-skill 来源标记
-  （技能目录内 `.superpowers-origin.txt`）的技能按 URL 重拉，面板内就地展示**变更摘要**
-  （每项 updated / skipped / failed 与 before → after），无需新建会话。
+- 面板工具栏 **Update** 按钮一键更新全部技能：git 仓库执行 `git pull`；带**单个技能
+  目录内的**来源标记（`.superpowers-origin.txt`）的技能按标记重拉；**根级标记（整组）
+  与无来源的**技能显示 skipped，面板内就地展示**变更摘要**（每项 updated / skipped /
+  failed 与 before → after），无需新建会话。
 
 > 外部 agent 技能**不注册**进模型的 `available_skills` 目录：模型不能自行调用它们，只能经
 > 勾选 → `/name@agent` 令牌 → 插件读取文件直接注入这一路径使用。
@@ -70,9 +71,9 @@ cd ~/.dsh/profiles/web && pnpm install
    名单里，否则被拒绝并提示去面板启用；你自己手输的 `/skill` 手势不受此限；
 5. Skills 页工具栏下拉框切换排序：Repo（默认）/ Name / Most used / Source（Source 下
    外部技能按 Codex/Grok/Hermes 分组）；
-6. Skills 页工具栏 **Update** 按钮：一键更新全部技能（git 仓库 `git pull`；带
-   `.superpowers-origin.txt` 来源标记的技能按 URL 重拉），面板内就地展示变更摘要，
-   无需新建会话；无更新源的手工技能标记为 skipped；
+6. Skills 页工具栏 **Update** 按钮：一键更新全部技能（git 仓库执行 `git pull`；带
+   **单个技能目录内** `.superpowers-origin.txt` 来源标记的技能按标记重拉；根级标记
+   （整组）与无来源的显示 skipped），面板内就地展示变更摘要，无需新建会话；
 7. 无简介的 skill 会自动生成（每次一个，英文一句话，生成结果缓存）；也可以点行内按钮手动生成；
 8. 发送消息后，技能内容以"注入"行出现在对话中（repo 全选时注入行标签为 repo 名），
    模型即可按该技能工作；调用次数 +1（Most used 排序据此更新）。
