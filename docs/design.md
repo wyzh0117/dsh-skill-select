@@ -43,7 +43,8 @@
    模型正常使用）。
 10. **外部 agent 技能**：除 `~/.dsh/skills` 外，扫描 codex/grok/hermes 的用户技能
     目录（排除各自内置），以复合身份 `agent:name` 展示，重名全列、可分别勾选；
-    勾选或加入 Auto-start 后由插件**直接注入**（不进 `ctx.skills`，见 §2.5）。
+    勾选后在草稿写入 `/name@agent` 带来源令牌，发送时由插件识别并**直接注入**
+    （不进 `ctx.skills`，见 §2.5）；Auto-start 同样支持。
 11. **一键更新**：对 git 仓库型技能 `git pull`、对带来源标记的技能按 URL 重拉
     （§2.6），结果在面板内以精简摘要展示，**不新建会话**。
 12. **UI 一致性**：repo 组头名用与技能名一致的等宽字体且略大（13px vs 12.5px）；
@@ -137,7 +138,7 @@ export default class SkillSelectService extends Service {
 - **勾选 → 草稿（简洁令牌）**：勾选状态按 session 存 localStorage
   （`dsh-skill-select:checked:<sessionId>`），经 `set-checked` 同步宿主。草稿纯函数
   `composeDraft`：移除本插件管理令牌后按 `tokensForChecked` 追加（repo 满选 → 单
-  `/repo名`，否则逐个 `/skill`）。**外部技能不写草稿令牌**（§2.5）。
+  `/repo名`，否则逐个 `/skill`）；**外部技能写 `/name@agent` 带来源令牌**（§2.5）。
 - **UI 一致性（§1.12）**：repo 组头名 `fontFamily: var(--ds-font-family-code)`,
   `fontSize: 13`（技能名 12.5）、字重 600；repo 模式下组内技能行 `padding-left`
   增加 ~16px 缩进；“Other”组计数与三态用 `(s.repo ?? "")` 归一化。
@@ -205,19 +206,21 @@ interface ExternalSkillView {
 }
 ```
 
-**set-checked**：`skills` 数组可含技能名或复合 id；宿主分别维护
-`#checkedBySession`（DSH 技能，供守卫）与 `#checkedExternalBySession`（复合 id）。
+**set-checked**：`skills` 数组可含技能名或复合 id；宿主统一存 `#checkedBySession`
+（供守卫；复合 id 与任何 DSH 技能名不冲突，守卫按名判定即可）。外部技能注入由
+`/name@agent` 手势驱动，不依赖该镜像。
 
 **summarize**：`name` 允许传复合 id；命中外部技能则 `readExternalSkill` 读文件
 生成简介（缓存 key 用复合 id），不再走 `ctx.skills.get`。
 
-**注入**：pre-step 观察者新增一步——对 `#checkedExternalBySession[sessionId]` 中
-本会话尚未注入的复合 id（每会话去重：记录本会话已注入的复合 id 集合，字符串，
-非对象 WeakSet），`readExternalSkill` + `renderSkillContent` 注入
-（`source.kind:"skill-invocation"`，标签=技能名），计入 `usage`。**不写草稿令牌**
-（直接注入，时序等同 Auto-start，避开 `/name` 重名歧义）。Auto-start（`defaults`）
-同样接受复合 id，注入逻辑与 DSH 技能一致；勾选注入与默认注入共用 `counted` 去重，
-避免同一复合 id 重复注入/计数。
+**注入（令牌驱动 `/name@agent`）**：外部技能勾选后，客户端在草稿写入带来源令牌
+`/name@agent`（如 `/ego-browser@grok`）；`@` 不在 DSH 手势语法内，`dsh-tool-skill`
+不会误注。Host pre-step 观察者新增 `scanExternalGestures(messages)` 扫描
+`/name@agent`，解析为复合 id `agent:name`，`readExternalSkill` + `renderSkillContent`
+注入（`source.kind:"skill-invocation"`，标签=技能名），计入 `usage`；解析不到对应
+技能则跳过（与 DSH 未知 `/name` 一致）。Auto-start（`defaults`）接受复合 id，每会话
+首条用户消息注入一次；与手势注入共用 `counted` 去重，避免重复注入/计数。外部技能
+不进 `ctx.skills`，`/name@agent` 属用户手势，不受 guard 限制。
 
 **守卫**：外部技能不进 `ctx.skills`，`skill` 工具本就无法按名解析，无需额外拦截；
 `isAllowedSkill` 对复合 id 天然按字符串匹配即可。
@@ -316,8 +319,8 @@ interface UpdateItem {
 
 - **DSH 技能**：勾选 → 草稿追加 ` /name`（repo 满选 → `/repo名`）→ 发送 →
   `dsh-tool-skill` 注入 `<skill_content>`。
-- **外部技能**：勾选（复合 id）→ 同步 `set-checked` → 下一条用户消息 pre-step 由
-  本插件直接注入（不写草稿令牌）。
+- **外部技能**：勾选（复合 id）→ 草稿写入 `/name@agent` → 发送 → 本插件 pre-step
+  识别该手势并注入对应来源的文件内容。
 - **默认技能（DSH 或外部）**：每会话首条用户消息注入一次。
 
 ## 4. 安装
@@ -351,8 +354,9 @@ interface UpdateItem {
 - [ ] R9 勾选后草稿出现 ` /name`（或满选 repo 的 `/repo名`）；取消移除；发送后
       注入行出现在对话且模型可正常使用。
 - [ ] R10 外部技能：codex/grok/hermes 用户技能出现在列表（排除内置），来源徽标
-      区分；重名技能全列可分别勾选；勾选/Auto-start 后下一条消息直接注入对应
-      文件内容、计入调用；不污染 `ctx.skills`/`available_skills`。
+      区分；重名技能全列可分别勾选；勾选后草稿出现 `/name@agent`，发送后注入对应
+      文件内容、计入调用；Auto-start 首条消息注入一次；不污染
+      `ctx.skills`/`available_skills`。
 - [ ] R11 一键更新：git 仓库技能 pull、带来源标记技能重拉，`skipped`/`failed`
       如实标注；面板内展示精简变更摘要，不新建会话。
 - [ ] R12 “Other” 组计数与三态正确（null repo 归一化），无 (0) 误显。
