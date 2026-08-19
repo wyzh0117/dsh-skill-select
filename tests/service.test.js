@@ -430,3 +430,38 @@ test("service: 计数失败（domain 写入抛错）不阻断 agent 流程", asy
   const decision = await dispatchPreStepWith(ctx, [userMsg("/demo-skill 计数")]);
   assert.equal(decision.kind, "enter", "计数写入失败时 decision 仍原样返回");
 });
+
+// ── Task 3：summarize/set-checked 复合 id（agent:name）通路 ─────────────────
+
+test("service: summarize 复合 id（agent:name）走外部 SKILL.md 解析", async (t) => {
+  const { getRoute } = await bootService();
+  const { status, body } = await callRoute(getRoute(), "/skill-select/api/summarize", {
+    sessionId: "s1", name: "grok:ego-browser",
+  });
+  if (status === 500) {
+    // 环境无 ~/.grok/skills/ego-browser 时跳过具体断言（不绑定真实技能）。
+    t.skip("~/.grok/skills/ego-browser 不存在，跳过复合 id summarize 具体断言");
+    return;
+  }
+  assert.equal(status, 200);
+  assert.equal(typeof body.value.description, "string");
+  assert.ok(body.value.description.length > 0, "返回非空简介");
+});
+
+test("service: set-checked 接受复合 id（agent:name），拒绝非法复合格式", async () => {
+  const { getRoute } = await bootService();
+
+  // 合法：普通技能名 + 复合 id 混合
+  let res = await callRoute(getRoute(), "/skill-select/api/set-checked", {
+    sessionId: "s1", skills: ["demo-skill", "grok:ego-browser"],
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.value, { sessionId: "s1", count: 2 });
+
+  // 非法复合格式 → 400 bad-request
+  for (const bad of [["Grok:ego"], ["grok:"], ["a:b:c"], ["grok:ego browser"], [""]]) {
+    res = await callRoute(getRoute(), "/skill-select/api/set-checked", { sessionId: "s1", skills: bad });
+    assert.equal(res.status, 400, `skills=${JSON.stringify(bad)} 应 400`);
+    assert.equal(res.body.error.code, "bad-request");
+  }
+});

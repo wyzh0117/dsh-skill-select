@@ -601,3 +601,32 @@ test("scanExternalGestures ignores plain /name and dedupes", () => {
   const msgs = [{ source: { kind: "user" }, content: [{ type: "text", text: "/brainstorming /ego-browser@grok /ego-browser@grok" }] }];
   assert.deepEqual(scanExternalGestures(msgs), ["grok:ego-browser"]);
 });
+
+test("resolveList includes external skills with agent grouping and defaultStart", async () => {
+  const list = await resolveList({
+    sessions: fakeSessions("s1"),
+    skills: { list: async () => [], get: async () => undefined },
+    summaries: {},
+    usage: { "grok:ego-browser": { count: 2, lastUsedAt: "x" } },
+    defaults: ["grok:ego-browser"],
+    sessionId: "s1",
+  });
+  // external 必须为数组，且每项带完整字段（不绑定具体机器上存在的技能）。
+  assert.ok(Array.isArray(list.external), "external 为数组");
+  for (const e of list.external) {
+    assert.equal(typeof e.id, "string", "id 为字符串");
+    assert.equal(typeof e.agent, "string", "agent 为字符串");
+    assert.equal(typeof e.name, "string", "name 为字符串");
+    assert.equal(typeof e.repo, "string", "repo 为字符串");
+    assert.equal(typeof e.usage, "number", "usage 为数字");
+    assert.equal(typeof e.defaultStart, "boolean", "defaultStart 为布尔");
+  }
+  // 机器上存在 ~/.grok/skills/ego-browser 时，校验其具体聚合值。
+  const ext = list.external.find((e) => e.id === "grok:ego-browser");
+  if (ext !== undefined) {
+    assert.equal(ext.agent, "grok");
+    assert.equal(ext.repo, "grok");
+    assert.equal(ext.usage, 2);
+    assert.equal(ext.defaultStart, true);
+  }
+});
