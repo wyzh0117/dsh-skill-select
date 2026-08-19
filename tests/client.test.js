@@ -135,11 +135,11 @@ test("client: repoTokens 仅收录合法 kebab 且无同名成员的 repo 名", 
 test("client: tokensForChecked 满选 repo → /repo 令牌，部分/非法名 → 逐个", () => {
   const { tokensForChecked } = captured.__test;
   const skills = [
-    { name: "a", repo: "superpowers" },
-    { name: "b", repo: "superpowers" },
-    { name: "c", repo: "Auto-Empirical-Research-Skills" },
-    { name: "d", repo: null },
-    { name: "e" },
+    { id: "a", name: "a", kind: "dsh", repo: "superpowers" },
+    { id: "b", name: "b", kind: "dsh", repo: "superpowers" },
+    { id: "c", name: "c", kind: "dsh", repo: "Auto-Empirical-Research-Skills" },
+    { id: "d", name: "d", kind: "dsh", repo: null },
+    { id: "e", name: "e", kind: "dsh" },
   ];
   // 满选 superpowers → 一个 /superpowers；c（非法 kebab repo 名）逐个；d/e 逐个
   assert.deepEqual(
@@ -162,12 +162,22 @@ test("client: stripManagedTokens 移除管理内令牌、保留其它内容", ()
   assert.equal(stripManagedTokens("", managed), "");
 });
 
+test("tokensForChecked emits /name@agent for external skills", () => {
+  const skills = [{ id: "grok:ego-browser", kind: "external", agent: "grok", name: "ego-browser", repo: "grok" }];
+  assert.deepEqual(captured.__test.tokensForChecked(skills, ["grok:ego-browser"]), ["/ego-browser@grok"]);
+});
+
+test("stripManagedTokens removes both /name and /name@agent", () => {
+  const managed = new Set(["brainstorming", "grok:ego-browser"]);
+  assert.equal(captured.__test.stripManagedTokens("/brainstorming /ego-browser@grok tail", managed), "tail");
+});
+
 test("client: composeDraft 重算草稿（追加/覆盖/取消）", () => {
   const { composeDraft } = captured.__test;
   const skills = [
-    { name: "a", repo: "superpowers" },
-    { name: "b", repo: "superpowers" },
-    { name: "c" },
+    { id: "a", name: "a", kind: "dsh", repo: "superpowers" },
+    { id: "b", name: "b", kind: "dsh", repo: "superpowers" },
+    { id: "c", name: "c", kind: "dsh" },
   ];
   assert.equal(composeDraft(skills, ["a", "b"], ""), "/superpowers");
   assert.equal(composeDraft(skills, ["a"], "帮我干活"), "帮我干活 /a");
