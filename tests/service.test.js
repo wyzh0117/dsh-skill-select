@@ -448,6 +448,17 @@ test("service: summarize 复合 id（agent:name）走外部 SKILL.md 解析", as
   assert.ok(body.value.description.length > 0, "返回非空简介");
 });
 
+test("service: summarize 不存在的复合 id 返回 404 skill-not-found", async () => {
+  const { getRoute } = await bootService();
+  const { status, body } = await callRoute(getRoute(), "/skill-select/api/summarize", {
+    sessionId: "s1", name: "grok:definitely-not-a-real-skill",
+  });
+  assert.equal(status, 404);
+  assert.equal(body.ok, false);
+  assert.equal(body.error.code, "skill-not-found");
+  assert.match(body.error.message, /definitely-not-a-real-skill/);
+});
+
 test("service: set-checked 接受复合 id（agent:name），拒绝非法复合格式", async () => {
   const { getRoute } = await bootService();
 
