@@ -4,15 +4,18 @@ import {
   SkillSelectApiError,
   buildRepoIndex,
   classifySource,
+  externalRoots,
   extractFallbackDescription,
   hashContent,
   isAllowedSkill,
   isTrustedRequest,
   mergeUsage,
+  parseExternalSkill,
   resolveList,
   resolveRepo,
   resolveSummary,
   scanSkillGestures,
+  splitFrontmatter,
   toggleDefaults,
 } from "../lib/index.js";
 
@@ -545,4 +548,40 @@ test("resolveList: 未传 defaults 时全部 defaultStart=false", async () => {
     sessions: fakeSessions("s1"), skills, summaries: {}, sessionId: "s1",
   });
   assert.equal(views[0].defaultStart, false);
+});
+
+// ── 外部技能解析 ─────────────────────────────────────────────────────────
+
+test("externalRoots resolves ~ against home", () => {
+  const roots = externalRoots("/Users/me");
+  assert.deepEqual(roots, [
+    { agent: "codex", path: "/Users/me/.codex/skills" },
+    { agent: "grok", path: "/Users/me/.grok/skills" },
+    { agent: "hermes", path: "/Users/me/.hermes/skills" },
+  ]);
+});
+
+test("splitFrontmatter separates yaml frontmatter and body", () => {
+  const raw = "---\nname: x\ndescription: hello\n---\n\n# Body\nline\n";
+  assert.equal(splitFrontmatter(raw).frontmatter, "name: x\ndescription: hello");
+  assert.equal(splitFrontmatter(raw).body, "\n# Body\nline\n");
+  assert.deepEqual(splitFrontmatter("no frontmatter"), { frontmatter: null, body: "no frontmatter" });
+});
+
+test("parseExternalSkill reads description/whenToUse and keeps body", () => {
+  const raw = [
+    "---",
+    "description: >",
+    "  Folded description line.",
+    "whenToUse: when needed",
+    "---",
+    "",
+    "# Real body",
+  ].join("\n");
+  const skill = parseExternalSkill({ agent: "grok", name: "ego-browser", raw, dirPath: "/tmp/grok/ego-browser" });
+  assert.equal(skill.name, "ego-browser");
+  assert.equal(skill.description, "Folded description line.");
+  assert.equal(skill.whenToUse, "when needed");
+  assert.equal(skill.content, "\n# Real body");
+  assert.deepEqual(skill.resourceBase, { kind: "directory", path: "/tmp/grok/ego-browser" });
 });
