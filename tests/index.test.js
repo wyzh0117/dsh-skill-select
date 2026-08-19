@@ -14,6 +14,7 @@ import {
   resolveList,
   resolveRepo,
   resolveSummary,
+  scanExternalGestures,
   scanSkillGestures,
   splitFrontmatter,
   toggleDefaults,
@@ -584,4 +585,19 @@ test("parseExternalSkill reads description/whenToUse and keeps body", () => {
   assert.equal(skill.whenToUse, "when needed");
   assert.equal(skill.content, "\n# Real body");
   assert.deepEqual(skill.resourceBase, { kind: "directory", path: "/tmp/grok/ego-browser" });
+});
+
+// ── 外部手势扫描 ─────────────────────────────────────────────────────────
+
+test("scanExternalGestures extracts agent:name tokens", () => {
+  const msgs = [
+    { source: { kind: "user" }, content: [{ type: "text", text: "use /ego-browser@grok now and /foo@codex" }] },
+    { source: { kind: "assistant" }, content: [{ type: "text", text: "/ignored@hermes" }] },
+  ];
+  assert.deepEqual(scanExternalGestures(msgs), ["grok:ego-browser", "codex:foo"]);
+});
+
+test("scanExternalGestures ignores plain /name and dedupes", () => {
+  const msgs = [{ source: { kind: "user" }, content: [{ type: "text", text: "/brainstorming /ego-browser@grok /ego-browser@grok" }] }];
+  assert.deepEqual(scanExternalGestures(msgs), ["grok:ego-browser"]);
 });
