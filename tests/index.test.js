@@ -11,6 +11,7 @@ import {
   isTrustedRequest,
   mergeUsage,
   parseExternalSkill,
+  parseOriginMarker,
   resolveList,
   resolveRepo,
   resolveSummary,
@@ -629,4 +630,12 @@ test("resolveList includes external skills with agent grouping and defaultStart"
     assert.equal(ext.usage, 2);
     assert.equal(ext.defaultStart, true);
   }
+});
+
+// ── parseOriginMarker ─────────────────────────────────────────────────────
+
+test("parseOriginMarker reads source/commit/version", () => {
+  const txt = "source=https://github.com/obra/superpowers.git\ncommit=b36e082\nversion=v6.3.0\ninstalled=2026-08-14\n";
+  assert.deepEqual(parseOriginMarker(txt), { source: "https://github.com/obra/superpowers.git", commit: "b36e082", version: "v6.3.0" });
+  assert.equal(parseOriginMarker("no source here"), null);
 });
