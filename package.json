@@ -20,6 +20,9 @@
     "test": "node --test",
     "check": "node --check lib/index.js && node --check lib/client.js"
   },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  },
   "license": "MIT",
   "keywords": [
     "dsh",
