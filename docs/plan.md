@@ -130,7 +130,7 @@ export function externalRoots(home = homedir()) {
 /** 切分 YAML frontmatter 与正文；无 frontmatter 时 frontmatter 为 null。 */
 export function splitFrontmatter(content) {
   if (typeof content !== "string") return { frontmatter: null, body: content ?? "" };
-  const m = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/);
+  const m = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
   if (m === null) return { frontmatter: null, body: content };
   return { frontmatter: m[1], body: content.slice(m[0].length) };
 }
