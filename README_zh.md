@@ -10,7 +10,7 @@ DSH Web 插件：在侧边栏勾选已安装的 skill，并注入当前会话。
 
 ## 功能
 
-- 列出全部已配置 skill。标注 **Project**（`.dsh/skills`）/ **Global**（`~/.dsh/skills`），能推断时显示所属 **repo**。
+- 列出全部已配置 skill。标注 **Global**，能推断时显示所属 **repo**。
 - **Skills**：本会话勾选。单项写入 `/skill-name`；整 repo 勾满写入 `/repo`，发送时展开。重新打开侧边栏会清空本页。
 - **Auto-start**：常驻默认启动名单，每个会话首条消息注入一次。勾选方式与 Skills 相同。
 - 排序：**Repo**（默认）/ **Name** / **Most used** / **Source**。Repo 与 Source 按组折叠。

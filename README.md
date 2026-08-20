@@ -10,7 +10,7 @@ DSH web plugin: pick installed skills from a sidebar and inject them into the cu
 
 ## Features
 
-- Lists every configured skill. Marks **Project** (`.dsh/skills`) vs **Global** (`~/.dsh/skills`), and a **repo** label when it can be inferred.
+- Lists every configured skill. Marks **Global**, and a **repo** label when it can be inferred.
 - **Skills**: session-only checks. A skill appends `/skill-name` to the composer; a fully checked repo writes `/repo` and expands on send. Reopening the sidebar clears this tab.
 - **Auto-start**: persistent defaults, injected once on the first message of each session. Same grouping and checkboxes as Skills.
 - Sort: **Repo** (default) / **Name** / **Most used** / **Source**. Repo and Source views fold by group.
