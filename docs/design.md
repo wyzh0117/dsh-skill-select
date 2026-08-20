@@ -2,8 +2,9 @@
 
 > DSH Web 插件：侧边栏 skill 选择器（英文 UI）。读取已配置的全部 skill（标注
 > Project/Global 与所属 repo，并额外扫描 codex/grok/hermes 的用户技能），以页签
-> 形式合并进 dsh-better-sidebar（未安装/被禁用时回退到**右侧缘活动栏 + VSCode 式
-> 右滑面板**）。勾选后把 `/skill` 手势填入当前会话输入框草稿（外部 agent 技能改为
+> 形式合并进 dsh-better-sidebar（未安装/被禁用时自绘侧边栏**顶替其位置**：开关在
+> "Session log" 右侧、以 `#root margin-right` 推进布局）。勾选后把 `/skill` 手势填入
+> 当前会话输入框草稿（外部 agent 技能改为
 > 下一条消息直接注入），随用户下一条消息生效（由 DSH 宿主在 pre-step 边界自动注入
 > `<skill_content>`）。无简介的 skill 由宿主侧 LLM 生成一句英文简介并缓存；提供
 > **一键更新**所有 skill 并在面板内展示精简变更摘要。绝不改写 skill 原文件。
@@ -14,9 +15,9 @@
 1. 自动读取所有已下载/配置的 skill，并区分全局（`~/.dsh/skills` 等 user 根）与
    局部（项目 `.dsh/skills` 等 project 根）skill。
 2. 以 sidebar 形式展示；已安装 dsh-better-sidebar 时自动注册为其页签
-   （`ctx.betterSidebar.registerTab`）；未安装/被禁用时回退到**右侧缘竖向活动栏 +
-   从 DSH 右侧滑出的 VSCode 式面板**（对齐 better-sidebar 的拓展点位置、展示与
-   弹出方式），而非浮动窗口或悬浮圆钮。
+   （`ctx.betterSidebar.registerTab`）；未安装/被禁用时自绘侧边栏**顶替其位置**
+   （开关在右上角、"Session log" 右侧，`#root margin-right` 推进布局，完全参照
+   better-sidebar），而非浮动窗口或悬浮圆钮。
 3. 展示每个 skill 的名称、简介与**所属 repo 徽标**：repo 由内置映射表
    （superpowers 全家桶等）+ 嵌套目录（`<repo>/<skill>`）路径推断得出，两者都
    无法判定时不显示；判定过程绝不修改 skill 文件。
@@ -28,9 +29,11 @@
 5. **默认启动（Auto-start）**：用户勾选的技能存入插件 domain（全局生效）；
    每个会话的首条用户消息时，宿主把默认技能内容注入会话一次（`skill-invocation`
    来源、官方 `renderSkillContent` 渲染），并计入调用次数。
-6. **不选不启动**：宿主注册 `ctx.tools.guard` 守卫——模型通过 `skill` 工具
-   调用**不在**「默认启动名单 ∪ 本会话已勾选名单」的技能时被拒绝（模型收到
-   明确错误、绝不执行）；用户手动 `/skill` 手势不受限；技能目录不隐藏。
+6. **Guard 开关（默认关闭）**：宿主始终注册 `ctx.tools.guard` 守卫，但守卫仅在
+   开关打开时生效——打开时模型通过 `skill` 工具调用**不在**「默认启动名单 ∪
+   本会话已勾选名单」的技能被拒绝（模型收到明确错误、绝不执行）；关闭时完全放行，
+   回到无本插件的默认工作流。开关经 `set-guard` 持久化到 domain，UI 位于标题栏
+   "Skills" 旁。用户手动 `/skill` 手势始终不受限；技能目录不隐藏。
 7. 调用次数为真实调用统计：`/skill-name` 手势、`/repo名` 展开的成员、默认注入
    的技能都计入（同一步骤同一技能只 +1），写入插件 storage domain；仅从安装后
    累计，不回填历史。
@@ -112,7 +115,8 @@ export default class SkillSelectService extends Service {
   默认注入，串行写 domain（`mergeUsage`）。
 - **repo 令牌展开**：repo 索引（`buildRepoIndex`）展开成员，渲染单条注入行。
 - **默认技能注入**：每个 agent 对象（WeakSet）首条含用户消息的步骤注入一次。
-- **skill 工具守卫**：`ctx.tools.guard` 拒绝「默认名单 ∪ 会话勾选名单」外的调用。
+- **skill 工具守卫**：`ctx.tools.guard` 始终注册；开关打开时拒绝「默认名单 ∪ 会话勾选名单」
+  外的调用，关闭时放行（回到默认工作流）。
 - **summarize**：`ctx.skills.get` → frontmatter → 缓存 → LLM → 回退提取。
 - **路由**：`/skill-select/api` 围栏路由，信任围栏逐字复用 dsh-pin 的
   `isTrustedRequest`。
@@ -122,9 +126,10 @@ export default class SkillSelectService extends Service {
 `window.__ModuleLoader__.load({ id: "dsh-skill-select", factory })`，
 `exports = { apply, inject: ["conversation"] }`。
 
-- **better-sidebar 探测（三保险，可选服务）**：`ctx.get("betterSidebar")` +
-  `internal/service` 事件 + 3.2s 兜底。就绪则 `registerTab`；否则 `mountStandalone`
-  挂载自绘 UI（见 §2.7 活动栏）。
+- **better-sidebar 集成（可选服务）**：探测到 `ctx.betterSidebar` 即注册页签
+  （`registerTab`）；否则 `mountStandalone` 挂载自绘侧边栏（见 §2.7），其开关位置
+  （右上角、"Session log" 右侧）与布局推进（`#root` 的 `margin-right` 挤开主内容）
+  完全参照 better-sidebar。
 - **tab 描述符**：`{ id: "skill-select", title: "Skills", icon, single: true,
   order: 90, component }`；`component` 接收 `{ ctx, scope, tab, visible }`。
 - **数据**：`POST /skill-select/api/list {sessionId}` → `{ skills, external }`
@@ -132,16 +137,23 @@ export default class SkillSelectService extends Service {
   `summarize` 队列回填。tab/抽屉打开与 `visible` 变化刷新，另设手动刷新 + 搜索。
 - **面板分页**：Skills / Auto-start 两页。
 - **排序下拉框**：Repo（默认）/ Name / Most used / Source；纯函数
-  `sortByName`/`sortByUsage`/`groupByRepo`。
-- **repo 分组视图**：组头 = 三态复选框 + repo 名（或 Other）+ 数量 + 折叠箭头，
-  默认收起；组按名升序、无 repo 最后；组头复选作用于全组成员。
-- **行内**：技能名 + 来源小徽标；repo 模式由组头承载 repo 名（不逐行重复）。
+  `sortByName`/`sortByUsage`/`groupByRepo`；两页共用同一排序选择。
+- **分组折叠视图**：Repo 与 Source 两种分组都默认按组收起（折叠键 =
+  `tab:sortMode:groupKey`）；Skills 的 repo 组头 = 三态复选框 + repo 名（或 Other）
+  + 数量 + 折叠箭头，组头复选作用于全组成员（`applyCheckedBulk`）；Auto-start 的
+  repo 组头同样带三态复选框（`defaultCheckState` → `setDefaultsBulk` 批量
+  `set-defaults`），Source 组头只做折叠。组按名升序、无 repo 最后。
+- **行内**：复选框在名字左侧；技能名 + 来源小徽标；repo/source 模式由组头承载组名
+  （不逐行重复），组内行 `padding-left` 缩进。
+- **勾选语义**：Skills 勾选是本会话临时选择，**每次重新打开侧边栏重置为未勾选**
+  （`resetCheckedForSession`，清 localStorage + 同步 `set-checked` + 剥离草稿令牌）；
+  Auto-start 勾选走 `set-default`/`set-defaults` 持久化到 domain，跨打开、跨重启保持。
 - **勾选 → 草稿（简洁令牌）**：勾选状态按 session 存 localStorage
   （`dsh-skill-select:checked:<sessionId>`），经 `set-checked` 同步宿主。草稿纯函数
   `composeDraft`：移除本插件管理令牌后按 `tokensForChecked` 追加（repo 满选 → 单
   `/repo名`，否则逐个 `/skill`）；**外部技能写 `/name@agent` 带来源令牌**（§2.5）。
 - **UI 一致性（§1.12）**：repo 组头名 `fontFamily: var(--ds-font-family-code)`,
-  `fontSize: 13`（技能名 12.5）、字重 600；repo 模式下组内技能行 `padding-left`
+  `fontSize: 13`（技能名 12.5）、字重 600；分组模式下组内技能行 `padding-left`
   增加 ~16px 缩进；“Other”组计数与三态用 `(s.repo ?? "")` 归一化。
 
 ### 2.3 LLM 简介生成（host）
@@ -253,17 +265,23 @@ interface ExternalSkillView {
 > superpowers 只有整组根级来源标记，更新时被报为 `skipped`（不重拉）；其余技能
 > 显示“无更新源/跳过”。机制已就位，将来以 git/per-skill 来源方式安装即自动可更新。
 
-### 2.7 回退 UI：活动栏 + VSCode 式右滑面板
+### 2.7 回退 UI：自绘侧边栏（顶替 better-sidebar 位置）
 
-无 better-sidebar 时的自绘 UI（`SkillsDrawer`/`mountStandalone`）：
-- **拓展点（活动栏）**：右侧缘竖向细条（`position:fixed; right:0;
-  top:<会话顶栏底部>; bottom:0; width≈40px`），顶部放 Skills 图标按钮；开合态
-  图标切换 ×。不再用右上角悬浮圆钮。
-- **展示方式**：面板顶部保留标题栏 + Skills/Auto-start 子页签，内部复用
-  `SkillPanel`。
-- **弹出方式**：面板 `top/right/bottom` 贴边、`width:380px`（`maxWidth:92vw`）、
-  `translateX(100%↔0)` 滑入、左分隔线、无遮罩（对话区仍可交互）——整体对齐
-  better-sidebar 的视觉与弹出。
+无 better-sidebar 时的自绘 UI（`SkillsDrawer`/`mountStandalone`），开关位置与布局
+推进完全参照 better-sidebar：
+- **开关**：右上角固定小按钮（`position:fixed; top:3px; right:10px`，28×28 面板图标），
+  位于会话头部 "Session log" 胶囊的右侧，悬停显示 **skill-select**；面板收起时给会话
+  头部加 `padding-right`（`body[data-skill-select-sidebar-collapsed]`）让 "Session log"
+  让出右上角，避免被开关遮挡。
+- **点击外部关闭**：面板打开时监听 `document` 的 `mousedown`，点击面板与开关之外的
+  区域自动 `setOpen(false)`。
+- **布局推进（缩放规则）**：面板打开时向 `<html>` 写入 CSS 变量
+  `--skill-select-sidebar-width`，注入的样式以 `#root { margin-right:
+  var(--skill-select-sidebar-width) }` 把主内容向左挤开（**非 transform 缩放**），
+  面板占据右侧腾出的空间；窄屏（≤767px）改为全宽覆盖、不推进。
+- **展示方式**：面板 `top/right/bottom` 贴边、`width:400px`、`translateX(102%↔0)`
+  滑入、左分隔线；顶部标题栏（Skills + Guard 开关）+ Skills/Auto-start 子页签，
+  内部复用 `SkillPanel`。
 - 当前会话：`ctx.get("sessions").list` snapshot 的 `current`；打开时刷新列表。
 - better-sidebar 存在时仍走页签（现有逻辑不动）。
 
@@ -342,9 +360,10 @@ interface UpdateItem {
 
 - [ ] R1 列表包含 `~/.dsh/skills` 下全部 skill 且标记“全局”，项目 `.dsh/skills`
       的标记“局部”。
-- [ ] R2 better-sidebar 存在时注册 Skills 页签；不存在/被禁用时，右侧缘出现竖向
-      活动栏图标，点击后 VSCode 式面板从右侧滑出（贴边、无遮罩、× 关闭），视觉
-      与弹出对齐 better-sidebar。
+- [ ] R2 better-sidebar 存在时注册 Skills 页签；不存在/被禁用时，右上角（"Session
+      log" 右侧）出现侧边栏开关，点击后右侧面板滑出并以 `#root margin-right` 把
+      主内容向左挤开（无遮罩、无 transform 缩放），开关位置与布局推进对齐
+      better-sidebar。
 - [ ] R3 repo 徽标/分组：技能名后显示 repo 徽标；Skills 页默认 repo 分组、组头
       三态复选 + 折叠（默认收起）；repo 全选草稿只写 `/repo名`，发送后成员注入
       且各 +1；repo 组头名等宽字体、略大于技能名，组内技能行缩进。
@@ -352,8 +371,9 @@ interface UpdateItem {
       次数降序。
 - [ ] R5 分页：Skills / Auto-start；set-default 持久化到 domain，list 返回
       defaultStart；新会话首条用户消息默认技能注入一次。
-- [ ] R6 不选不启动：模型 `skill` 工具调用未在名单的技能被 guard 拒绝；名单内
-      放行；用户 `/skill` 手势不受限；guard 不抛异常。
+- [ ] R6 Guard 开关：默认关闭时 guard 全部放行（回到默认工作流）；打开后模型
+      `skill` 工具调用未在名单的技能被拒绝、名单内放行；用户 `/skill` 手势不受限；
+      guard 不抛异常；`set-guard` 持久化到 domain。
 - [ ] R7 调用计数：`/name` 手势、`/repo` 成员、默认注入均计数；同一步骤同技能
       只计一次；计数失败不影响 agent 流程。
 - [ ] R8 有 frontmatter 简介原样展示；缺失的生成后展示并缓存于 plugin domain；

@@ -324,6 +324,29 @@ test("service: set-default name 必须是 kebab 技能名或 agent:name 复合 i
   }
 });
 
+test("service: set-defaults 批量写入 domain（去重/移除/校验）", async () => {
+  const { getRoute, domainState } = await bootService();
+
+  // 批量加入（去重）
+  let res = await callRoute(getRoute(), "/skill-select/api/set-defaults", { names: ["a-skill", "b-skill", "a-skill"], on: true });
+  assert.equal(res.status, 200);
+  assert.deepEqual(domainState.defaults, ["a-skill", "b-skill"]);
+  assert.equal(res.body.value.count, 2);
+
+  // 批量移除
+  res = await callRoute(getRoute(), "/skill-select/api/set-defaults", { names: ["a-skill"], on: false });
+  assert.equal(res.status, 200);
+  assert.deepEqual(domainState.defaults, ["b-skill"]);
+
+  // 非法 names / on → 400 bad-request
+  res = await callRoute(getRoute(), "/skill-select/api/set-defaults", { names: "a-skill", on: true });
+  assert.equal(res.status, 400);
+  res = await callRoute(getRoute(), "/skill-select/api/set-defaults", { names: ["a-skill"], on: "yes" });
+  assert.equal(res.status, 400);
+  res = await callRoute(getRoute(), "/skill-select/api/set-defaults", { names: ["UPPER"], on: true });
+  assert.equal(res.status, 400);
+});
+
 test("service: set-checked 写入内存镜像供 guard 判定；校验会话与数组", async () => {
   const { getRoute, getGuard } = await bootService();
   const guard = getGuard();
@@ -343,8 +366,8 @@ test("service: set-checked 写入内存镜像供 guard 判定；校验会话与�
   assert.deepEqual(res.body.value, { sessionId: "s1", count: 2 });
 });
 
-test("service: guard 放行默认名单/会话勾选，拒绝未选择技能", async () => {
-  const { getRoute, getGuard } = await bootService();
+test("service: guard 默认关闭放行，set-guard 开启后拦截未选择技能", async () => {
+  const { getRoute, getGuard, domainState } = await bootService();
   const guard = getGuard();
   const exec = (name, overrides = {}) => ({
     name: "skill",
@@ -353,7 +376,14 @@ test("service: guard 放行默认名单/会话勾选，拒绝未选择技能", a
     ...overrides,
   });
 
-  // 未允许 → 拒绝并给出提示
+  // 默认关闭：回到无本插件的默认工作流 → 全部放行。
+  assert.equal(guard(exec("brainstorming")), undefined, "守卫关闭时不拦截");
+
+  // 开启守卫 → 未允许技能被拒绝并给出提示。
+  let res = await callRoute(getRoute(), "/skill-select/api/set-guard", { on: true });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.value, { guard: true });
+  assert.equal(domainState.guard, true, "set-guard 持久化到 domain");
   const reason = guard(exec("brainstorming"));
   assert.equal(typeof reason, "string");
   assert.match(reason, /not enabled/);
@@ -366,13 +396,27 @@ test("service: guard 放行默认名单/会话勾选，拒绝未选择技能", a
   await callRoute(getRoute(), "/skill-select/api/set-checked", { sessionId: "s1", skills: ["writing-plans"] });
   assert.equal(guard(exec("writing-plans")), undefined);
 
-  // 非 skill 工具、非法参数一律放行
+  // 关闭守卫 → 再次全部放行。
+  res = await callRoute(getRoute(), "/skill-select/api/set-guard", { on: false });
+  assert.equal(res.status, 200);
+  assert.equal(domainState.guard, false);
+  assert.equal(guard(exec("brainstorming")), undefined, "守卫关闭后不再拦截");
+
+  // 非 skill 工具、非法参数一律放行（守卫开启时亦然，由 dsh-tool-skill 校验）
+  await callRoute(getRoute(), "/skill-select/api/set-guard", { on: true });
   assert.equal(guard({ name: "bash", arguments: {}, agent: agentA }), undefined);
   assert.equal(guard(exec("Not A Skill")), undefined);
   assert.equal(guard({ name: "skill", arguments: "raw", agent: agentA }), undefined);
 
   // guard 内部异常不逃逸（无 agent/session 的场景）
   assert.equal(guard({ name: "skill", arguments: { name: "brainstorming" } }), undefined);
+});
+
+test("service: set-guard on 非 boolean → bad-request", async () => {
+  const { getRoute } = await bootService();
+  const { status, body } = await callRoute(getRoute(), "/skill-select/api/set-guard", { on: "yes" });
+  assert.equal(status, 400);
+  assert.equal(body.error.code, "bad-request");
 });
 
 test("service: repo 令牌 /superpowers 展开为单条注入行并计数", async () => {

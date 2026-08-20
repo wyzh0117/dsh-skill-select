@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" role="img" aria-labelledby="title desc">
+  <title id="title">dsh-SkillSelect</title>
+  <desc id="desc">Pick skills from the sidebar.</desc>
+  <rect width="1920" height="1080" fill="#0E1116"/>
+  <g transform="translate(160 380)">
+    <rect width="320" height="320" rx="76" fill="#3B82F6"/>
+    <rect x="68" y="70" width="184" height="40" rx="20" fill="#F5F7FA" opacity="0.42"/>
+    <rect x="116" y="140" width="136" height="40" rx="20" fill="#F5F7FA"/>
+    <circle cx="88" cy="160" r="22" fill="#F5F7FA"/>
+    <path d="M78 160.5l7.2 7.2 15.2-16.4" fill="none" stroke="#0E1116" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="68" y="210" width="184" height="40" rx="20" fill="#F5F7FA" opacity="0.42"/>
+  </g>
+  <text x="576" y="528" fill="#F5F7FA" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif" font-size="88" font-weight="650" letter-spacing="-3">dsh-SkillSelect</text>
+  <text x="576" y="592" fill="#F5F7FA" opacity="0.68" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif" font-size="36" font-weight="400" letter-spacing="-0.5">Pick skills from the sidebar.</text>
+</svg>

@@ -364,3 +364,104 @@ test("repoCheckState normalizes null repo to empty", () => {
   assert.equal(captured.__test.repoCheckState(skills, "", ["a"]), "all");
   assert.equal(captured.__test.repoCheckState(skills, "", []), "none");
 });
+
+// ── 守卫开关 store ─────────────────────────────────────────────────────────
+test("client: guard 初始关闭，loadSkills 读取 list.guard，setGuard 写回 host", async () => {
+  const { guard, loadSkills } = captured.__test;
+  assert.equal(guard.getGuardSnapshot().guard, false, "初始关闭（无本插件默认工作流）");
+  let setGuardBody = null;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.includes("/list")) {
+      return { ok: true, json: async () => ({ ok: true, value: { skills: [], guard: true } }) };
+    }
+    if (u.includes("/set-guard")) {
+      setGuardBody = JSON.parse(init.body);
+      return { ok: true, json: async () => ({ ok: true, value: { guard: setGuardBody.on } }) };
+    }
+    return { ok: true, json: async () => ({ ok: true, value: { sessionId: "s1", count: 0 } }) };
+  };
+  try {
+    await loadSkills("s1");
+    assert.equal(guard.getGuardSnapshot().guard, true, "list 返回 guard=true 后本地同步");
+    await guard.setGuard(false);
+    assert.deepEqual(setGuardBody, { on: false }, "set-guard 发送 on:false");
+    assert.equal(guard.getGuardSnapshot().guard, false, "本地回填为 false");
+  } finally {
+    delete globalThis.fetch;
+  }
+});
+
+// ── 重新打开侧边栏重置 Skills 勾选（Auto-start 走 set-default 不受影响）───────
+test("client: resetCheckedForSession 清空勾选并剥离草稿令牌", async () => {
+  const { checked, resetCheckedForSession } = captured.__test;
+  const storage = new Map();
+  globalThis.localStorage = {
+    getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+    setItem: (key, value) => storage.set(key, value),
+  };
+  let draft = "帮我写方案 /brainstorming /ego-browser@grok";
+  const ctx = {
+    get: () => undefined,
+    on: () => () => {},
+    conversation: {
+      input: {
+        for: () => ({
+          setDraft: (v) => { draft = v; },
+          state: { getSnapshot: () => ({ draft }) },
+        }),
+      },
+    },
+  };
+  const requests = [];
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), body: init ? JSON.parse(init.body) : null });
+    return { ok: true, json: async () => ({ ok: true, value: { sessionId: "s1", count: 0 } }) };
+  };
+  try {
+    checked.setChecked("s1", ["brainstorming", "grok:ego-browser"]);
+    requests.length = 0; // 清掉 setChecked 自身的同步，只观察 reset 的同步
+    resetCheckedForSession(ctx, "s1");
+    await sleep(10);
+    assert.deepEqual(checked.checkedFor("s1"), [], "勾选被清空");
+    assert.equal(draft, "帮我写方案", "草稿里本插件管理的 /name 与 /name@agent 被剥离");
+    const sync = requests.find((r) => r.url.includes("/set-checked"));
+    assert.ok(sync, "重置后同步 set-checked 到 host");
+    assert.deepEqual(sync.body.skills, [], "host 收到空名单");
+  } finally {
+    delete globalThis.fetch;
+    delete globalThis.localStorage;
+  }
+});
+
+// ── Auto-start 组三态 + 批量默认启动 ────────────────────────────────────────
+test("client: defaultCheckState 三态派生（按 defaultStart）", () => {
+  const { defaultCheckState } = captured.__test;
+  const skills = [
+    { id: "a", name: "a", defaultStart: true },
+    { id: "b", name: "b", defaultStart: true },
+    { id: "c", name: "c", defaultStart: false },
+  ];
+  assert.equal(defaultCheckState(skills), "some");
+  assert.equal(defaultCheckState([skills[0], skills[1]]), "all");
+  assert.equal(defaultCheckState([skills[2]]), "none");
+  assert.equal(defaultCheckState([]), "none");
+});
+
+test("client: setDefaultsBulk 单次 set-defaults 批量切换", async () => {
+  const { setDefaultsBulk } = captured.__test;
+  let body = null;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes("/set-defaults")) {
+      body = JSON.parse(init.body);
+      return { ok: true, json: async () => ({ ok: true, value: { count: 2 } }) };
+    }
+    return { ok: true, json: async () => ({ ok: true, value: {} }) };
+  };
+  try {
+    await setDefaultsBulk(["a", "b"], true);
+    assert.deepEqual(body, { names: ["a", "b"], on: true });
+  } finally {
+    delete globalThis.fetch;
+  }
+});

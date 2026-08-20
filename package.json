@@ -14,7 +14,9 @@
     "lib/client.js",
     "cordis.patch.yml",
     "dsh.plugin.json",
-    "README.md"
+    "README.md",
+    "README_zh.md",
+    "LICENSE"
   ],
   "scripts": {
     "test": "node --test",
@@ -23,6 +25,14 @@
   "dependencies": {
     "yaml": "^2.8.1"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wyzh0117/dsh-skill-select.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wyzh0117/dsh-skill-select/issues"
+  },
+  "homepage": "https://github.com/wyzh0117/dsh-skill-select#readme",
   "license": "MIT",
   "keywords": [
     "dsh",

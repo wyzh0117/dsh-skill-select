@@ -1,3 +1,35 @@
+# dependencies
 node_modules/
+
+# logs
 *.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# env
+.env
+.env.*
+!.env.example
+
+# os
 .DS_Store
+Thumbs.db
+
+# editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# test / coverage
+coverage/
+.nyc_output/
+*.lcov
+
+# pack artifacts
+*.tgz
+
+# local tooling
+.superpowers/

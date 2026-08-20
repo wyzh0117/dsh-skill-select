@@ -3,7 +3,7 @@
 # 用法: bash scripts/install.sh
 set -euo pipefail
 
-PLUGIN_DIR="/Users/youngi/Documents/MiniWork/dsh插件/skill-select"
+PLUGIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE_DIR="$HOME/.dsh/profiles/web"
 PKG_JSON="$PROFILE_DIR/package.json"
 
