@@ -24,11 +24,10 @@ DSH Web 插件：在侧边栏勾选已安装的 skill，并注入当前会话。
 仅 web profile。
 
 ```bash
-# 本地开发请用 link:，改代码重启即生效
-dsh plugin --profile web add "link:/path/to/skill-select"
+dsh plugin --profile web add "github:wyzh0117/dsh-skill-select#main"
 
-# 从 GitHub 安装
-dsh plugin --profile web add "github:<you>/dsh-skill-select#main"
+# 本地开发请用 link:，改代码重启即生效
+# dsh plugin --profile web add "link:/path/to/skill-select"
 ```
 
 重启 `dsh web`，然后硬刷新浏览器（`Cmd/Ctrl+Shift+R`）。

@@ -24,11 +24,10 @@ DSH web plugin: pick installed skills from a sidebar and inject them into the cu
 Web profile only.
 
 ```bash
-# local development — use link: so edits apply after restart
-dsh plugin --profile web add "link:/path/to/skill-select"
+dsh plugin --profile web add "github:wyzh0117/dsh-skill-select#main"
 
-# from GitHub
-dsh plugin --profile web add "github:<you>/dsh-skill-select#main"
+# local development — use link: so edits apply after restart
+# dsh plugin --profile web add "link:/path/to/skill-select"
 ```
 
 Restart `dsh web`, then hard-refresh the browser (`Cmd/Ctrl+Shift+R`).
