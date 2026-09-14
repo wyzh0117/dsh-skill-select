@@ -24,10 +24,50 @@ const manifest = JSON.parse(readFileSync(join(root, "dsh.plugin.json"), "utf8"))
 const clientSource = readFileSync(join(root, "lib/client.js"), "utf8");
 const hostSource = readFileSync(join(root, "lib/index.js"), "utf8");
 
-/** client bundle 里唯一允许 require 的模块：模块表种子包。 */
-const SEED_ALLOWLIST = new Set(["react", "react-dom"]);
+/**
+ * 平台种子表（web shell 的 staticModules）的兜底副本：本机没有 DSH 安装时用它。
+ * 有安装时以本机 bundle 现取的为准 —— DSH 升级改了种子表，护栏自动跟随。
+ */
+const SEED_FALLBACK = [
+  "react",
+  "react/jsx-runtime",
+  "react-dom",
+  "react-dom/client",
+  "@deepseek-ai/cordis",
+  "@deepseek-ai/dsh-client-store",
+  "@deepseek-ai/dsh-client-ui-slots",
+  "@deepseek-ai/dsh-client-ui-primitives",
+  "@deepseek-ai/dsh-client-ui-dockkit",
+];
 /** 0.1.5 起不再存在 / 不再是种子包的模块，出现即回归。 */
 const REMOVED_MODULES = ["@deepseek-ai/dsh-client-runtime"];
+
+/** 从 web shell bundle 里的 `{react:…,"react/jsx-runtime":…,…}` 字面量解析种子包名。 */
+function seedModulesFromBundle(source) {
+  const map = source.match(/\{react:[^{}]*"react\/jsx-runtime"[^{}]*\}/);
+  if (!map) return undefined;
+  const keys = new Set();
+  for (const entry of map[0].slice(1, -1).split(",")) {
+    const quoted = entry.match(/^\s*"([^"]+)"\s*:/);
+    const bare = entry.match(/^\s*([A-Za-z_$][\w$]*)\s*:/);
+    if (quoted) keys.add(quoted[1]);
+    else if (bare) keys.add(bare[1]);
+  }
+  return keys.size >= 3 ? keys : undefined;
+}
+
+/** 种子包集合：优先取自本机 DSH 的 web 前端 bundle，取不到时退回 {@link SEED_FALLBACK}。 */
+function seedModules() {
+  for (const root of dshModuleRoots()) {
+    const assets = join(root, "@deepseek-ai", "dsh-web-frontend", "dist", "assets");
+    if (!existsSync(assets)) continue;
+    for (const file of readdirSync(assets).filter((name) => name.endsWith(".js"))) {
+      const parsed = seedModulesFromBundle(readFileSync(join(assets, file), "utf8"));
+      if (parsed) return parsed;
+    }
+  }
+  return new Set(SEED_FALLBACK);
+}
 
 /**
  * DSH 模块可能在两处：CLI 自带树（@deepseek-ai/dsh/node_modules）与 profile 根
@@ -102,9 +142,13 @@ function exportedNames(packageDir) {
 }
 
 test("compat: client bundle 只 require 模块表种子包", () => {
+  const seeds = seedModules();
   const specs = [...new Set(moduleSpecs(clientSource))].filter((spec) => !spec.startsWith("."));
   for (const spec of specs) {
-    assert.ok(SEED_ALLOWLIST.has(spec), `client bundle 不该 require "${spec}"：DSH 0.1.5 的模块表不保证提供它，请改用 ctx 服务（如 ctx.sessions.scope）`);
+    assert.ok(
+      seeds.has(spec),
+      `client bundle 不该 require "${spec}"：不在平台种子表内（${[...seeds].join(", ")}），DSH 0.1.5 的模块表不保证提供它，请改用 ctx 服务（如 ctx.sessions.scope）`,
+    );
   }
 });
 
