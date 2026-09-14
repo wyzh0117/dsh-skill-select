@@ -29,16 +29,30 @@ const SEED_ALLOWLIST = new Set(["react", "react-dom"]);
 /** 0.1.5 起不再存在 / 不再是种子包的模块，出现即回归。 */
 const REMOVED_MODULES = ["@deepseek-ai/dsh-client-runtime"];
 
-/** 定位本机 DSH 安装；找不到就跳过依赖它的断言（CI 无 DSH 时仍跑其余断言）。 */
-function locateDshModules() {
-  const candidates = [];
-  if (process.env.DSH_HOME) candidates.push(join(process.env.DSH_HOME, "profiles", "node_modules"));
-  candidates.push(join(process.env.HOME ?? "", ".dsh", "profiles", "node_modules"));
-  for (const dir of candidates) {
-    if (dir && existsSync(join(dir, "@deepseek-ai", "dsh"))) {
-      const nested = join(dir, "@deepseek-ai", "dsh", "node_modules");
-      return existsSync(nested) ? nested : dir;
-    }
+/**
+ * DSH 模块可能在两处：CLI 自带树（@deepseek-ai/dsh/node_modules）与 profile 根
+ * （profiles/node_modules）。只看一处会把 profile 根里真实可解析的模块误判为缺失，
+ * 所以存在性校验对两处取并集。
+ */
+function dshModuleRoots() {
+  const bases = [];
+  if (process.env.DSH_HOME) bases.push(join(process.env.DSH_HOME, "profiles"));
+  bases.push(join(process.env.HOME ?? "", ".dsh", "profiles"));
+  const roots = [];
+  for (const base of bases) {
+    const profileRoot = join(base, "node_modules");
+    const cliTree = join(profileRoot, "@deepseek-ai", "dsh", "node_modules");
+    if (existsSync(cliTree)) roots.push(cliTree);
+    if (existsSync(join(profileRoot, "@deepseek-ai"))) roots.push(profileRoot);
+  }
+  return roots;
+}
+
+/** spec 在任一模块根下可解析时返回其目录。 */
+function resolveDshModule(roots, spec) {
+  for (const root of roots) {
+    const dir = join(root, spec);
+    if (existsSync(dir)) return dir;
   }
   return undefined;
 }
@@ -49,16 +63,17 @@ function moduleSpecs(source) {
   return specs;
 }
 
+/** 只收集具名导入（花括号子句）；default / namespace 导入不算 named export。 */
 function namedImports(source) {
   const out = new Map();
-  for (const m of source.matchAll(/^\s*import\s+(?:([\w*\s{},$]+?)\s+from\s+)?["']([^"']+)["']/gm)) {
-    if (!m[1] || m[2].startsWith(".") || m[2].startsWith("node:")) continue;
+  for (const m of source.matchAll(/^\s*import\s+(?:[\w*\s$]+\s*,\s*)?\{([^}]*)\}\s*from\s*["']([^"']+)["']/gm)) {
+    const spec = m[2];
+    if (spec.startsWith(".") || spec.startsWith("node:")) continue;
     const names = m[1]
-      .replace(/[{}]/g, " ")
       .split(",")
       .map((part) => part.trim().split(/\s+as\s+/)[0].trim())
       .filter((name) => name && name !== "*" && name !== "default");
-    if (names.length > 0) out.set(m[2], names);
+    if (names.length > 0) out.set(spec, names);
   }
   return out;
 }
@@ -105,20 +120,20 @@ test("compat: 不再引用 0.1.5 已移除的模块", () => {
 test("compat: dsh.client.inject 只列真实存在的 client 模块", () => {
   const inject = pkg.dsh?.client?.inject ?? [];
   assert.ok(!inject.includes("@deepseek-ai/dsh-client-runtime"), "0.1.5 起 dsh-client-runtime 不是 client 模块，必须从 inject 移除");
-  const modules = locateDshModules();
-  if (!modules) return; // 本机没有 DSH 安装：跳过存在性校验
+  const roots = dshModuleRoots();
+  if (roots.length === 0) return; // 本机没有 DSH 安装：跳过存在性校验
   for (const spec of inject) {
-    assert.ok(existsSync(join(modules, spec)), `dsh.client.inject 列了 DSH 安装里不存在的模块：${spec}`);
+    assert.ok(resolveDshModule(roots, spec), `dsh.client.inject 列了 DSH 安装里不存在的模块：${spec}`);
   }
 });
 
 test("compat: host 半引用的 named export 在当前 DSH 里仍然存在", () => {
-  const modules = locateDshModules();
-  if (!modules) return;
+  const roots = dshModuleRoots();
+  if (roots.length === 0) return;
   for (const [spec, names] of namedImports(hostSource)) {
     if (!spec.startsWith("@deepseek-ai/")) continue;
-    const dir = join(modules, spec);
-    if (!existsSync(dir)) continue; // 由插件自身依赖提供，不在 DSH 安装里
+    const dir = resolveDshModule(roots, spec);
+    if (!dir) continue; // 由插件自身依赖提供，不在 DSH 安装里
     const exported = exportedNames(dir);
     if (!exported || exported.size === 0) continue;
     for (const name of names) {
