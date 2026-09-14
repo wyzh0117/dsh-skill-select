@@ -20,9 +20,6 @@ globalThis.window = {
     load: (entry) => {
       assert.equal(entry.id, "dsh-skill-select");
       captured = entry.factory((name) => {
-        if (name === "@deepseek-ai/dsh-client-runtime") {
-          return { createScope: (ctx, key) => ({ ctx: { marker: "scoped", key } }) };
-        }
         if (name === "react") {
           return { createElement: (type, props, ...children) => ({ type, props, children }) };
         }
@@ -51,6 +48,7 @@ function fakeCtx(overrides = {}) {
     get: (name) => undefined,
     on: () => () => {},
     conversation: { input: { for: () => ({ setDraft() {}, state: { getSnapshot: () => ({ draft: "" }) } }) } },
+    sessions: { scope: (key) => ({ marker: "scoped", key }) },
     _injections: [],
     _registrations: [],
     ...overrides,
@@ -412,6 +410,7 @@ test("client: resetCheckedForSession 清空勾选并剥离草稿令牌", async (
         }),
       },
     },
+    sessions: { scope: (key) => ({ marker: "scoped", key }) },
   };
   const requests = [];
   globalThis.fetch = async (url, init) => {

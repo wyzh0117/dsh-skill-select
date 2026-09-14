@@ -32,6 +32,30 @@ dsh plugin --profile web add "github:wyzh0117/dsh-skill-select#main"
 
 重启 `dsh web`，然后硬刷新浏览器（`Cmd/Ctrl+Shift+R`）。
 
+## DSH 版本兼容
+
+| 插件版本 | 支持的 DSH | 说明 |
+|---|---|---|
+| **0.1.1**（当前） | `^0.1.0-rc.6 \|\| ^0.1.5-rc.1` | 旧版与 0.1.5 两条线都能跑。 |
+| 0.1.0 | `^0.1.0-rc.6` | **在 0.1.5+ 上不可用**，见下。 |
+
+DSH 0.1.5 改了 client 模块表：`@deepseek-ai/dsh-client-runtime` 不再是种子包，
+`require("@deepseek-ai/dsh-client-runtime")` 会抛 `missed the module table`，
+页面报 **Failed to load plugins**（宿主本身能起来）。0.1.1 改用
+`ctx.sessions.scope(sessionId)`，并在 `dsh.plugin.json` / `peerDependencies`
+里声明支持 0.1.5。
+
+**升级 DSH 后必做**：`dsh` 只升了 CLI，profile 里已安装的插件仍停在旧 API，
+需要重新解析一次：
+
+```bash
+dsh plugin --profile web update     # 重新解析 github:/registry 安装的插件
+# link:/ 本地目录是就地使用，重启 dsh web 即可
+```
+
+再在本仓库跑 `npm test`：`tests/dsh-compat.test.js` 会在 DSH 删掉某个 named
+export 或砍掉某个 client 种子包时直接失败，不必等宿主/页面炸掉才发现。
+
 ## 侧边栏兼容
 
 本仓库不附带其他侧边栏。

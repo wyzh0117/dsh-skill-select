@@ -32,6 +32,30 @@ dsh plugin --profile web add "github:wyzh0117/dsh-skill-select#main"
 
 Restart `dsh web`, then hard-refresh the browser (`Cmd/Ctrl+Shift+R`).
 
+## DSH compatibility
+
+| Plugin | DSH | Notes |
+|---|---|---|
+| **0.1.1** (current) | `^0.1.0-rc.6 \|\| ^0.1.5-rc.1` | Works on both the old and the 0.1.5 lines. |
+| 0.1.0 | `^0.1.0-rc.6` | **Broken on 0.1.5+** — see below. |
+
+DSH 0.1.5 changed the client module table: `@deepseek-ai/dsh-client-runtime` is no
+longer a seed package, so `require("@deepseek-ai/dsh-client-runtime")` throws
+`missed the module table` and the browser reports **Failed to load plugins**
+(the host itself starts fine). 0.1.1 replaces it with `ctx.sessions.scope(sessionId)`
+and declares the 0.1.5 range.
+
+**Upgrading DSH?** DSH upgrades only the CLI — plugins already installed in the
+profile keep the old API. Re-resolve them afterwards:
+
+```bash
+dsh plugin --profile web update     # re-resolve github:/registry plugins
+# link:/ local checkouts are used in place — just restart dsh web
+```
+
+Then run `npm test` in this repo: `tests/dsh-compat.test.js` fails loudly when a
+DSH named export disappears or a client seed package goes away.
+
 ## Sidebar compatibility
 
 This plugin does not bundle another sidebar.
