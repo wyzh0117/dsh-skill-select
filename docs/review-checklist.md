@@ -39,7 +39,7 @@
 ## 检查步骤
 
 ### 静态检查
-- [ ] `cd /Users/youngi/Documents/MiniWork/dsh插件/skill-select`
+- [ ] `cd <skill-select 仓库根目录>`
 - [ ] `node --check lib/index.js` 与 `node --check lib/client.js` 通过
 - [ ] `node --test tests/` 全绿（host 半单测 + client 冒烟）
 - [ ] host 半不 import 任何深层子路径；仅用包根导出

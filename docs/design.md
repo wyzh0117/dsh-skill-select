@@ -351,7 +351,7 @@ interface UpdateItem {
 ## 4. 安装
 
 1. `~/.dsh/profiles/web/package.json`：
-   - `dependencies` 增加 `"dsh-skill-select": "link:/Users/youngi/Documents/MiniWork/dsh插件/skill-select"`
+   - `dependencies` 增加 `"dsh-skill-select": "link:/path/to/skill-select"`
    - `dsh.profile.bundles` 增加 `"dsh-skill-select"`
 2. 该目录 `pnpm install`（新依赖 `yaml`）。
 3. 重启 `dsh web`（host 半生效），浏览器硬刷新（client 半生效）。
