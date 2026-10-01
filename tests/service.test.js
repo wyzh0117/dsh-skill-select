@@ -42,8 +42,26 @@ async function bootService(skillsOverrides = {}, options = {}) {
   let closed = false;
 
   ctx.provide("storageDomain", { open: async () => ({ ...domain, close: () => { closed = true; } }) });
-  ctx.provide("sessions", fakeSession("s1"));
-  ctx.provide("settings", { get: (ns) => (ns === "agent-default-model" ? { provider: "p", model: "m" } : undefined) });
+  // options.coldSession：dsh 0.2 网页端的真实形态——会话只是被打开阅读，没有
+  // enter 进活存储，`sessions.get()` 一律 undefined，cwd 只能冷读。
+  ctx.provide("sessions", options.coldSession === true ? { get: () => undefined } : fakeSession("s1"));
+  if (options.coldSession === true) {
+    ctx.provide("sessionQuery", {
+      observeSession: async () => ({
+        header: { cwd: "/tmp/proj" },
+        projections: { values: { agentPreset: "standard" } },
+        [Symbol.dispose]: () => {},
+      }),
+    });
+    // 冷会话没有活 agent，scope 只能向 preset 注册租约（SessionSkillCatalog 同款）。
+    ctx.provide("agentPresets", {
+      acquireScope: async (id) => ({
+        key: { preset: id },
+        [Symbol.asyncDispose]: async () => {},
+      }),
+    });
+  }
+  ctx.provide("agentDefaultModel", { currentSelection: () => ({ provider: "p", model: "m" }) });
   ctx.provide("llm", {
     prepareCall: async (cfg) => ({
       config: cfg,
@@ -164,6 +182,25 @@ test("service: 无 agents 服务时 list 不携带 scope（回退兼容）", asy
   const { status } = await callRoute(getRoute(), "/skill-select/api/list", { sessionId: "s1" });
   assert.equal(status, 200);
   assert.equal(skillCalls.list.scope, undefined, "未提供 agents 时 scope 缺省");
+});
+
+test("service: 冷会话（活存储查不到）经 sessionQuery + 预设租约也能 list", async () => {
+  const { getRoute, skillCalls } = await bootService({}, { coldSession: true, withAgents: false });
+  const { status, body } = await callRoute(getRoute(), "/skill-select/api/list", { sessionId: "s1" });
+  assert.equal(status, 200, "网页端只打开未激活的会话必须能列出技能");
+  assert.equal(skillCalls.list.cwd, "/tmp/proj", "cwd 来自冷读");
+  assert.deepEqual(skillCalls.list.scope, { preset: "standard" }, "scope 来自常驻预设租约");
+  assert.equal(body.value.skills[0].name, "demo-skill");
+});
+
+test("service: 冷会话的 summarize 与 set-checked 不再被 404 挡住", async () => {
+  const { getRoute } = await bootService({}, { coldSession: true });
+  const sum = await callRoute(getRoute(), "/skill-select/api/summarize", { sessionId: "s1", name: "demo-skill" });
+  assert.equal(sum.status, 200);
+  assert.equal(sum.body.value.description, "自带简介");
+  const set = await callRoute(getRoute(), "/skill-select/api/set-checked", { sessionId: "s1", skills: ["demo-skill"] });
+  assert.equal(set.status, 200);
+  assert.equal(set.body.value.count, 1);
 });
 
 test("service: summarize 同样携带会话 scope 调用 skills.get", async () => {

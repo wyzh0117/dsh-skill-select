@@ -1,16 +1,20 @@
 /**
  * DSH 版本兼容回归测试。
  *
- * 背景（2026-09 DSH 0.1.5 升级事故）：
- *  1. `@deepseek-ai/dsh-settings` 删掉了 `settingsNamespace` / `installSettingsSection`
- *     等运行时 named export —— ESM 缺 named export 是 SyntaxError，cordis 整棵
- *     插件树加载失败，`dsh web` 进程直接退出。
- *  2. `@deepseek-ai/dsh-client-runtime` 不再是 0.1.5 模块表的种子包 ——
- *     client bundle 里 `require("@deepseek-ai/dsh-client-runtime")` 会抛
- *     "missed the module table"，页面报 "Failed to load plugins"。
+ * 背景（两次升级事故）：
+ *  1. 0.1.5：`@deepseek-ai/dsh-settings` 删掉了 `settingsNamespace` /
+ *     `installSettingsSection` 等运行时 named export —— ESM 缺 named export 是
+ *     SyntaxError，cordis 整棵插件树加载失败，`dsh web` 进程直接退出；
+ *     同时 `@deepseek-ai/dsh-client-runtime` 退出 client 模块表，
+ *     bundle 里 require 它会抛 "missed the module table"。
+ *  2. 0.2.0-rc.2：`dsh-app-boot` 新增硬门禁 —— 拿 package.json 里名字为
+ *     `@deepseek-ai/dsh` 或 `@deepseek-ai/dsh-*` 的 peerDependencies 对运行时版本做
+ *     semver 校验，不满足就把 bundle 整棵跳过（模块根本不会被 import）。
+ *     dsh.plugin.json 的 engines.dsh 在这一版不参与判定，只有 peer 范围能救命。
  *
- * 本文件把这两条教训固化成断言：以后升级 DSH 时跑 `npm test` 就能提前发现
- * 已删除的 named export / 已失效的 client 种子包，而不是等宿主或页面炸掉。
+ * 本文件把这些教训固化成断言：以后升级 DSH 时跑 `npm test` 就能提前发现
+ * 已删除的 named export / 已失效的种子包 / 不再覆盖运行时版本的 peer 范围，
+ * 而不是等宿主或页面炸掉。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -95,6 +99,28 @@ function resolveDshModule(roots, spec) {
     if (existsSync(dir)) return dir;
   }
   return undefined;
+}
+
+/**
+ * 本机 dsh 运行时版本。rc.2 起 dsh-app-boot 会拿 package.json 里所有
+ * `@deepseek-ai/dsh*` peerDependencies 对运行时版本做 semver 校验，
+ * 不满足就整棵 bundle 直接跳过（插件行禁用），dsh.plugin.json 的 engines 不参与判定。
+ */
+const FALLBACK_RUNTIME_VERSION = "0.2.0-rc.2";
+function runtimeVersion() {
+  const dir = resolveDshModule(dshModuleRoots(), "@deepseek-ai/dsh");
+  if (!dir) return FALLBACK_RUNTIME_VERSION;
+  try {
+    return JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).version ?? FALLBACK_RUNTIME_VERSION;
+  } catch {
+    return FALLBACK_RUNTIME_VERSION;
+  }
+}
+
+/** 运行时版本去掉补丁位后的“版本线”，如 0.2.0-rc.2 → 0.2。 */
+function runtimeLine(version) {
+  const [major, minor] = version.split(/[.\-+]/);
+  return `${major}.${minor}`;
 }
 
 function moduleSpecs(source) {
@@ -186,12 +212,13 @@ test("compat: host 半引用的 named export 在当前 DSH 里仍然存在", () 
   }
 });
 
-test("compat: 声明支持 0.1.5 版本线", () => {
+test("compat: peerDependencies / engines 覆盖本机 dsh 运行时版本线", () => {
+  const line = runtimeLine(runtimeVersion());
   const range = manifest.engines?.dsh ?? "";
-  assert.match(range, /0\.1\.5/, `dsh.plugin.json engines.dsh 未声明 0.1.5 支持：${range}`);
+  assert.ok(range.includes(line), `dsh.plugin.json engines.dsh 未声明 ${line} 支持：${range}`);
   for (const [name, spec] of Object.entries(pkg.peerDependencies ?? {})) {
-    if (!name.startsWith("@deepseek-ai/dsh-")) continue;
-    assert.ok(spec.includes("0.1.5"), `peerDependencies.${name} 未声明 0.1.5 支持：${spec}`);
+    if (!name.startsWith("@deepseek-ai/dsh")) continue;
+    assert.ok(spec.includes(line), `peerDependencies.${name} 未覆盖 dsh ${line} 版本线：${spec}（boot 侧 semver 校验不通过会整棵 bundle 跳过）`);
   }
 });
 

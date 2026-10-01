@@ -17,6 +17,8 @@ import {
   mergeUsage,
   parseExternalSkill,
   parseOriginMarker,
+  openSkillView,
+  readSessionCwd,
   resolveList,
   resolveRepo,
   resolveSummary,
@@ -28,6 +30,9 @@ import {
 } from "../lib/index.js";
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/** 没有默认模型时的 `ctx.agentDefaultModel` 替身（dsh 0.2 的读法）。 */
+const noModel = { currentSelection: () => undefined };
 
 function fakeSkill(overrides = {}) {
   return {
@@ -99,6 +104,141 @@ test("hashContent: 确定性 16 位 hex", () => {
   assert.notEqual(h, hashContent("abd"));
 });
 
+// ── readSessionCwd ─────────────────────────────────────────────────────────
+// dsh 0.2 的 `ctx.sessions` 只认已 enter 的活会话，网页端从历史打开的冷会话
+// 一律 `get() === undefined`。冷读走 `ctx.sessionQuery.observeSession()`，
+// 这三条锁住的就是"冷会话也能列出技能"这条主线，别再退回只读活存储。
+
+/** 冷读替身：返回一个带 cwd 的 observation，并记录租约是否被释放。 */
+function fakeSessionQuery(cwd, options = {}) {
+  const state = { disposed: false, calls: [] };
+  return {
+    state,
+    observeSession: async (sessionId, opts) => {
+      state.calls.push({ sessionId, opts });
+      if (options.error !== undefined) throw options.error;
+      return {
+        header: cwd === undefined ? {} : { cwd },
+        [Symbol.dispose]: () => { state.disposed = true; },
+      };
+    },
+  };
+}
+
+test("readSessionCwd: 冷会话（活存储查不到）经 sessionQuery 拿到 cwd，并释放租约", async () => {
+  const query = fakeSessionQuery("/tmp/cold");
+  const cwd = await readSessionCwd({
+    sessions: { get: () => undefined },
+    sessionQuery: query,
+    sessionId: "s-cold",
+  });
+  assert.equal(cwd, "/tmp/cold");
+  assert.equal(query.state.disposed, true, "observation 租约必须释放");
+  assert.deepEqual(query.state.calls[0], { sessionId: "s-cold", opts: { projectionMode: "none" } });
+});
+
+test("readSessionCwd: sessionQuery 优先于活存储", async () => {
+  const query = fakeSessionQuery("/tmp/cold");
+  const cwd = await readSessionCwd({ sessions: fakeSessions("s1"), sessionQuery: query, sessionId: "s1" });
+  assert.equal(cwd, "/tmp/cold");
+});
+
+test("readSessionCwd: 冷读的 SESSION_QUERY_SESSION_NOT_FOUND 映射为 404，其他失败为 500", async () => {
+  const notFound = { code: "SESSION_QUERY_SESSION_NOT_FOUND", message: "no such session" };
+  await assert.rejects(
+    readSessionCwd({ sessionQuery: fakeSessionQuery(undefined, { error: notFound }), sessionId: "s1" }),
+    (e) => e instanceof SkillSelectApiError && e.code === "session-not-found" && e.status === 404,
+  );
+  await assert.rejects(
+    readSessionCwd({ sessionQuery: fakeSessionQuery(undefined, { error: new Error("backend down") }), sessionId: "s1" }),
+    (e) => e instanceof SkillSelectApiError && e.status === 500 && /backend down/.test(e.message),
+  );
+});
+
+test("readSessionCwd: 无 sessionQuery 的宿主退回活存储；两边都没有才 404", async () => {
+  assert.equal(await readSessionCwd({ sessions: fakeSessions("s1"), sessionId: "s1" }), "/tmp/proj");
+  await assert.rejects(
+    readSessionCwd({ sessions: fakeSessions("s1"), sessionId: "nope" }),
+    (e) => e instanceof SkillSelectApiError && e.code === "session-not-found",
+  );
+});
+
+// ── openSkillView ──────────────────────────────────────────────────────────
+
+/** 带投影（agentPreset）的冷读替身。 */
+function fakeQueryWithPreset(cwd, preset) {
+  const state = { released: false };
+  return {
+    state,
+    observeSession: async () => ({
+      header: { cwd },
+      projections: { values: { agentPreset: preset } },
+      [Symbol.dispose]: () => { state.released = true },
+    }),
+  };
+}
+
+test("openSkillView: 活会话用 agent 作 scope，并从 preset 隔离组取 skills 注册表", async () => {
+  const agent = { id: "s1" };
+  const scoped = { list: async () => [] };
+  const host = { list: async () => [] };
+  const view = await openSkillView({
+    sessions: fakeSessions("s1"),
+    sessionQuery: undefined,
+    agents: { get: () => agent },
+    agentPresets: {
+      serviceFor: (a, name) => (a === agent && name === "skills" ? scoped : undefined),
+      acquireScope: async () => { throw new Error("活会话不该租常驻 scope") },
+    },
+    skills: host,
+    sessionId: "s1",
+  });
+  assert.equal(view.scope, agent);
+  assert.equal(view.registry, scoped);
+  await view.dispose();
+});
+
+test("openSkillView: 冷会话拿常驻预设租约作 scope，释放时两条租约一起还", async () => {
+  const key = { preset: "standard" };
+  let disposed = false;
+  const query = fakeQueryWithPreset("/tmp/cold", "standard");
+  const host = { list: async () => [] };
+  const view = await openSkillView({
+    sessions: { get: () => undefined },
+    sessionQuery: query,
+    agents: { get: () => undefined },
+    agentPresets: {
+      acquireScope: async (id) => {
+        assert.equal(id, "standard", "按会话投影出的 preset 租 scope");
+        return { key, [Symbol.asyncDispose]: async () => { disposed = true } };
+      },
+    },
+    skills: host,
+    sessionId: "s-cold",
+  });
+  assert.equal(view.cwd, "/tmp/cold");
+  assert.equal(view.scope, key, "冷会话 scope 来自预设租约");
+  assert.equal(view.registry, host, "无活 agent 时用宿主注册表");
+  await view.dispose();
+  assert.equal(disposed, true, "预设租约必须释放");
+  assert.equal(query.state.released, true, "observation 必须释放");
+});
+
+test("openSkillView: 无 agentPresets 的宿主退回全局层（scope 缺省）", async () => {
+  const host = { list: async () => [] };
+  const view = await openSkillView({
+    sessions: fakeSessions("s1"),
+    agents: undefined,
+    agentPresets: undefined,
+    skills: host,
+    sessionId: "s1",
+  });
+  assert.equal(view.scope, undefined);
+  assert.equal(view.cwd, "/tmp/proj");
+  assert.equal(view.registry, host);
+  await view.dispose();
+});
+
 // ── resolveList ────────────────────────────────────────────────────────────
 
 test("resolveList: 会话不存在抛 session-not-found", async () => {
@@ -106,6 +246,23 @@ test("resolveList: 会话不存在抛 session-not-found", async () => {
     resolveList({ sessions: fakeSessions("s1"), skills: { list: async () => [] }, summaries: {}, sessionId: "nope" }),
     (e) => e instanceof SkillSelectApiError && e.code === "session-not-found",
   );
+});
+
+test("resolveList: 冷会话用 sessionQuery 的 cwd 列技能（活存储为空也能列出）", async () => {
+  const seen = [];
+  const skills = {
+    list: async (view) => { seen.push(view); return [fakeSkill({ name: "cold-skill" })] },
+    get: async () => undefined,
+  };
+  const result = await resolveList({
+    sessions: { get: () => undefined },
+    sessionQuery: fakeSessionQuery("/tmp/cold"),
+    skills,
+    summaries: {},
+    sessionId: "s-cold",
+  });
+  assert.equal(seen[0].cwd, "/tmp/cold");
+  assert.equal(result.skills[0].name, "cold-skill");
 });
 
 test("resolveList: 映射字段、frontmatter 简介直用、source 分类", async () => {
@@ -223,14 +380,14 @@ test("resolveList: agents 中查不到该会话时也不传 scope", async () => 
 
 test("resolveSummary: 技能不存在抛 skill-not-found", async () => {
   await assert.rejects(
-    resolveSummary({ skills: { get: async () => undefined }, settings: {}, llm: {}, summaries: {}, name: "x", cwd: "/" }),
+    resolveSummary({ skills: { get: async () => undefined }, defaultModel: noModel, llm: {}, summaries: {}, name: "x", cwd: "/" }),
     (e) => e instanceof SkillSelectApiError && e.code === "skill-not-found",
   );
 });
 
 test("resolveSummary: frontmatter 简介直用且不写缓存", async () => {
   const skills = { get: async () => ({ name: "a", description: " 自带 ", content: "body" }) };
-  const result = await resolveSummary({ skills, settings: {}, llm: {}, summaries: {}, name: "a", cwd: "/" });
+  const result = await resolveSummary({ skills, defaultModel: noModel, llm: {}, summaries: {}, name: "a", cwd: "/" });
   assert.equal(result.description, "自带");
   assert.equal(result.mode, "frontmatter");
   assert.equal(result.fromCache, false);
@@ -247,7 +404,7 @@ test("resolveSummary: scope 透传给 skills.get", async () => {
     },
   };
   const result = await resolveSummary({
-    skills, settings: {}, llm: {}, summaries: {}, name: "a", cwd: "/tmp/proj", scope: agent,
+    skills, defaultModel: noModel, llm: {}, summaries: {}, name: "a", cwd: "/tmp/proj", scope: agent,
   });
   assert.equal(getOptions.cwd, "/tmp/proj");
   assert.equal(getOptions.scope, agent, "skills.get 收到会话 scope");
@@ -258,24 +415,28 @@ test("resolveSummary: 缓存命中", async () => {
   const content = "body-v1";
   const summaries = { a: { description: "缓存简介", contentHash: hashContent(content), mode: "llm" } };
   const skills = { get: async () => ({ name: "a", description: "", content }) };
-  const result = await resolveSummary({ skills, settings: {}, llm: {}, summaries, name: "a", cwd: "/" });
+  const result = await resolveSummary({ skills, defaultModel: noModel, llm: {}, summaries, name: "a", cwd: "/" });
   assert.equal(result.description, "缓存简介");
   assert.equal(result.fromCache, true);
 });
 
 test("resolveSummary: LLM 生成成功", async () => {
   const skills = { get: async () => ({ name: "a", description: "", content: "body" }) };
-  const settings = { get: () => ({ provider: "deepseek-official", model: "deepseek-v4-pro" }) };
+  const defaultModel = { currentSelection: () => ({ provider: "deepseek-official", model: "deepseek-v4-pro" }) };
+  let seen = null;
   const llm = {
     prepareCall: async (cfg) => ({
       config: cfg,
-      stream: async function* () {
+      stream: async function* (options) {
+        seen = options;
         yield { type: "text-delta", index: 0, text: "一句  " };
         yield { type: "text-delta", index: 0, text: "简介" };
       },
     }),
   };
-  const result = await resolveSummary({ skills, settings, llm, summaries: {}, name: "a", cwd: "/" });
+  const result = await resolveSummary({ skills, defaultModel, llm, summaries: {}, name: "a", cwd: "/" });
+  // dsh-llm 的 RequestUserInput.content 是 ContentBlock[]，不是裸字符串。
+  assert.deepEqual(seen.messages[0].content, [{ type: "text", text: "Skill name: a\n\nSkill content:\nbody" }]);
   assert.equal(result.description, "一句 简介");
   assert.equal(result.mode, "llm");
   assert.equal(result.fromCache, false);
@@ -285,19 +446,19 @@ test("resolveSummary: LLM 生成成功", async () => {
 test("resolveSummary: LLM 失败回退提取", async () => {
   const content = "# 手工兜底\n\n具体内容";
   const skills = { get: async () => ({ name: "a", description: "", content }) };
-  const settings = { get: () => ({ provider: "p", model: "m" }) };
+  const defaultModel = { currentSelection: () => ({ provider: "p", model: "m" }) };
   const llm = { prepareCall: async () => { throw new Error("llm down"); } };
-  const result = await resolveSummary({ skills, settings, llm, summaries: {}, name: "a", cwd: "/" });
+  const result = await resolveSummary({ skills, defaultModel, llm, summaries: {}, name: "a", cwd: "/" });
   assert.equal(result.description, "手工兜底");
   assert.equal(result.mode, "fallback");
 });
 
 test("resolveSummary: 无默认模型 + 无正文 → internal 错误", async () => {
   const skills = { get: async () => ({ name: "a", description: "", content: "---\nname: a\n---\n" }) };
-  const settings = { get: () => undefined };
+  const defaultModel = { currentSelection: () => undefined };
   const llm = { prepareCall: async () => { throw new Error("unreachable"); } };
   await assert.rejects(
-    resolveSummary({ skills, settings, llm, summaries: {}, name: "a", cwd: "/" }),
+    resolveSummary({ skills, defaultModel, llm, summaries: {}, name: "a", cwd: "/" }),
     (e) => e instanceof SkillSelectApiError && e.code === "internal",
   );
 });

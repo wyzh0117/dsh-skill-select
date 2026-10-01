@@ -8,113 +8,174 @@ import assert from "node:assert/strict";
 
 // ── 装载 client bundle ─────────────────────────────────────────────────────
 let captured;
-// react-dom 桩计数：用于断言 mountStandalone 被调用（createRoot/render/unmount）。
-const reactDomMock = {
-  createRootCount: 0,
-  renderCount: 0,
-  unmountCount: 0,
+
+/** 每次 useEffect 调用按顺序记在这里，供主体测试断言“可见时才拉列表”。 */
+const effectLog = [];
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// React 桩：够跑通 hook 顺序并记录元素树，不渲染任何 DOM。
+const reactMock = {
+  Fragment: "Fragment",
+  createElement: (type, props, ...children) => ({ type, props, children }),
+  useRef: (initial) => ({ current: initial }),
+  useState: (initial) => [initial, () => {}],
+  // 立即执行 effect 回调：本文件只关心“可见性翻转时做了什么”。
+  useEffect: (fn) => { effectLog.push(fn()); },
+  useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
 };
 
 globalThis.window = {
   __ModuleLoader__: {
     load: (entry) => {
       assert.equal(entry.id, "dsh-skill-select");
-      captured = entry.factory((name) => {
-        if (name === "react") {
-          return { createElement: (type, props, ...children) => ({ type, props, children }) };
-        }
-        if (name === "react-dom") {
-          return {
-            createRoot: () => {
-              reactDomMock.createRootCount += 1;
-              return {
-                render() { reactDomMock.renderCount += 1; },
-                unmount() { reactDomMock.unmountCount += 1; },
-              };
-            },
-            createPortal: (node) => node,
-          };
-        }
-        return {};
-      });
+      captured = entry.factory((name) => (name === "react" ? reactMock : {}));
     },
   },
 };
 
 await import("../lib/client.js");
 
+/**
+ * 官方右侧栏的假上下文：`sidebarRightTabs` 收页签类型，`slots` 收 keyed 注册，
+ * `effect` 就地执行回调并记下 disposer，好让测试断言卸载路径。
+ */
 function fakeCtx(overrides = {}) {
   const ctx = {
-    get: (name) => undefined,
+    get: () => undefined,
     on: () => () => {},
     conversation: { input: { for: () => ({ setDraft() {}, state: { getSnapshot: () => ({ draft: "" }) } }) } },
     sessions: { scope: (key) => ({ marker: "scoped", key }) },
-    _injections: [],
-    _registrations: [],
+    /** 已登记的 ctx.effect（label + 是否已卸载 + 已注册的页签类型）。 */
+    _effects: [],
+    /** 已登记的插槽注册（options + component）。 */
+    _slots: [],
+    _tabTypes: [],
+    effect(callback, label) {
+      const entry = { label, disposed: false, dispose: null };
+      const returned = callback();
+      entry.dispose = () => {
+        if (entry.disposed) return;
+        entry.disposed = true;
+        if (typeof returned === "function") returned();
+      };
+      ctx._effects.push(entry);
+      return entry.dispose;
+    },
+    inject: (deps, callback) => callback(ctx),
+    sidebarRightTabs: {
+      register(definition) {
+        ctx._tabTypes.push(definition);
+        return () => {};
+      },
+    },
+    slots: {
+      inject(name, callback) {
+        const dispose = callback();
+        return typeof dispose === "function" ? dispose : () => {};
+      },
+      register(options, component) {
+        ctx._slots.push({ options, component });
+        return () => {};
+      },
+    },
     ...overrides,
   };
   return ctx;
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** 从假上下文里取某个插槽的注册。 */
+function slotOf(ctx, name) {
+  return ctx._slots.find((entry) => entry.options.name === name);
+}
 
 // ── 用例 ───────────────────────────────────────────────────────────────────
 
 test("client: 模块装载返回 apply/inject", () => {
   assert.ok(captured, "factory 已执行");
   assert.equal(typeof captured.apply, "function");
-  assert.deepEqual(captured.inject, ["conversation"]);
+  assert.deepEqual(captured.inject, ["conversation", "slots", "sidebarRightTabs"]);
 });
 
-test("client: 无 betterSidebar 时 3.2s 后挂载独立抽屉（mountStandalone）", async () => {
-  reactDomMock.createRootCount = 0;
-  reactDomMock.renderCount = 0;
-  globalThis.document = {
-    createElement: () => ({ appendChild() {}, remove() {} }),
-    body: { appendChild() {} },
+test("client: apply 向官方右侧栏注册页签类型（阶段一）", () => {
+  const ctx = fakeCtx();
+  captured.apply(ctx);
+  assert.equal(ctx._tabTypes.length, 1, "只注册一个页签类型");
+  const definition = ctx._tabTypes[0];
+  const { TAB_ID, TAB_KIND, GUIDE_ORDER } = captured.__test.sidebar;
+  assert.equal(definition.id, TAB_ID);
+  assert.equal(definition.kind, TAB_KIND, "kind 是给 openTab 用的判别式");
+  assert.equal(definition.priority, "extension", "外部插件用扩展档，天然压过内置类型");
+  assert.equal(definition.patterns, undefined, "页面类型不认领任何资源地址");
+  assert.equal(definition.multiple, undefined, "同一 kind 每个 pane 只开一个页");
+  assert.equal(definition.title(""), "Skills");
+  assert.equal(definition.guide.length, 1);
+  const entry = definition.guide[0];
+  // guide 入口的 id 是必填项：两个入口同时省略 id 会被注册表判为重复 id 直接抛错。
+  assert.equal(entry.id, TAB_ID, "guide 入口带稳定 id");
+  assert.equal(entry.order, GUIDE_ORDER);
+  assert.equal(entry.title(), "Skills");
+  assert.equal(typeof entry.description(), "string");
+  assert.equal(typeof entry.icon, "function", "icon 是组件，不是元素");
+});
+
+test("client: apply 注册 keyed 页签主体与标题（阶段二，key === 阶段一的 id）", () => {
+  const ctx = fakeCtx();
+  captured.apply(ctx);
+  const { TAB_ID } = captured.__test.sidebar;
+  assert.equal(ctx._tabTypes[0].id, TAB_ID);
+  const body = slotOf(ctx, "sidebar.right.pane.tab");
+  const title = slotOf(ctx, "sidebar.right.pane.tab.title");
+  assert.ok(body, "主体注册进 sidebar.right.pane.tab");
+  assert.ok(title, "标题注册进 sidebar.right.pane.tab.title");
+  assert.equal(body.options.key, ctx._tabTypes[0].id, "keyed 插槽按定义的 id 派发");
+  assert.equal(title.options.key, ctx._tabTypes[0].id);
+  // 列表形状（id/order）在 keyed 插槽上是一次失败的注册，不是"近似正确"。
+  assert.equal(body.options.id, undefined);
+  assert.equal(body.options.order, undefined);
+  assert.equal(typeof body.component, "function");
+  assert.equal(typeof title.component, "function");
+});
+
+test("client: 页签主体在有会话时渲染技能面板，无会话时给出提示", () => {
+  effectLog.length = 0;
+  const ctx = fakeCtx();
+  captured.apply(ctx);
+  const { component } = slotOf(ctx, "sidebar.right.pane.tab");
+  const rendered = component({ sessionId: "s1", rootCtx: ctx, useTabInfo: () => ({ tab: { visible: false } }) });
+  assert.equal(rendered.type, "div", "外层是撑满 pane 的容器");
+  assert.ok(rendered.children.some((node) => node && node.props && node.props.sessionId === "s1"), "渲染 SkillPanel");
+  const empty = component({ sessionId: undefined, rootCtx: ctx, useTabInfo: () => ({ tab: { visible: false } }) });
+  assert.ok(JSON.stringify(empty).includes("No open session."), "无会话时说明原因");
+  const title = slotOf(ctx, "sidebar.right.pane.tab.title").component;
+  const chip = title({ useTabInfo: () => ({ tab: { title: "Skills" } }) });
+  assert.equal(chip.type, "Fragment", "标题胶囊是 fragment");
+});
+
+test("client: 页签主体只在可见时拉列表，重新显示时再拉一次", async () => {
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return { ok: true, json: async () => ({ ok: true, value: { skills: [] } }) };
   };
   try {
     const ctx = fakeCtx();
     captured.apply(ctx);
-    assert.equal(reactDomMock.createRootCount, 0, "不立即挂载");
-    await sleep(3400);
-    assert.ok(reactDomMock.createRootCount >= 1, "createRoot 被调用");
-    assert.ok(reactDomMock.renderCount >= 1, "render 被调用");
+    const { component } = slotOf(ctx, "sidebar.right.pane.tab");
+    const hidden = { tab: { visible: false } };
+    component({ sessionId: "s-vis", rootCtx: ctx, useTabInfo: () => hidden });
+    assert.equal(calls.filter((u) => u.includes("/list")).length, 0, "隐藏时不打宿主");
+    const shown = { tab: { visible: true } };
+    component({ sessionId: "s-vis", rootCtx: ctx, useTabInfo: () => shown });
+    assert.equal(calls.filter((u) => u.includes("/list")).length, 1, "首次显示拉一次列表");
+    // 等上一次请求收尾：in-flight 去重只合并并发请求，隐藏→显示的新周期仍要重新拉。
+    await sleep(10);
+    component({ sessionId: "s-vis", rootCtx: ctx, useTabInfo: () => shown });
+    assert.equal(calls.filter((u) => u.includes("/list")).length, 2, "再次显示再拉一次");
   } finally {
-    delete globalThis.document;
+    delete globalThis.fetch;
+    effectLog.length = 0;
   }
-});
-
-test("client: 有 betterSidebar 时立即注册 tab", () => {
-  const descriptor = {};
-  const ctx = fakeCtx({ get: (name) => (name === "betterSidebar" ? { registerTab: (d) => Object.assign(descriptor, d) } : undefined) });
-  captured.apply(ctx);
-  assert.equal(descriptor.id, "skill-select");
-  assert.equal(descriptor.title, "Skills", "side card 风格：英文标题");
-  assert.equal(descriptor.single, true);
-  assert.equal(descriptor.order, 90);
-  assert.equal(typeof descriptor.icon, "function", "tab 带图标工厂（side card 风格）");
-  assert.equal(typeof descriptor.component, "function");
-});
-
-test("client: betterSidebar 通过 internal/service 事件迟到时注册 tab", async () => {
-  const ctx = fakeCtx();
-  const listeners = [];
-  let provided = undefined;
-  ctx.on = (name, fn) => {
-    if (name === "internal/service") listeners.push(fn);
-    return () => {};
-  };
-  ctx.get = (name) => (name === "betterSidebar" ? provided : undefined);
-  captured.apply(ctx);
-  assert.equal(ctx._registrations.length, 0);
-  const descriptor = {};
-  provided = { registerTab: (d) => Object.assign(descriptor, d) };
-  listeners.forEach((fn) => fn("betterSidebar", provided));
-  assert.equal(descriptor.id, "skill-select");
-  // 3s 重探测与 3.2s 回退都不应再动作（服务已提供）
-  await sleep(3400);
-  assert.equal(ctx._registrations.length, 0, "tab 路径已占用，回退不注册");
 });
 
 test("client: repoTokens 仅收录合法 kebab 且无同名成员的 repo 名", () => {
@@ -290,50 +351,16 @@ test("client: checkedFor 懒加载并缓存 localStorage", () => {
   delete globalThis.localStorage;
 });
 
-// ── 竞态窗口与 disposer（修复 C 验收 [低] 竞态/HMR 项）───────────────────────
-test("client: betterSidebar 在定时兜底时才出现 → 注册 tab 而非回退", async () => {
+// ── 卸载与 HMR ─────────────────────────────────────────────────────────────
+test("client: 页签注册都在 ctx.effect 里，卸载时逐一撤销", () => {
   const ctx = fakeCtx();
-  let provided = undefined;
-  ctx.get = (name) => (name === "betterSidebar" ? provided : undefined);
   captured.apply(ctx);
-  const descriptor = {};
-  // 2s 后服务出现（早于 3.2s 兜底，晚于立即探测）
-  await sleep(2000);
-  provided = { registerTab: (d) => Object.assign(descriptor, d) };
-  await sleep(1400);
-  assert.equal(descriptor.id, "skill-select", "兜底定时器重新探测并注册 tab");
-  assert.equal(ctx._registrations.length, 0, "不注册回退");
-});
-
-test("client: apply 返回 disposer，卸载后定时器不再触发回退", async () => {
-  const ctx = fakeCtx();
-  const dispose = captured.apply(ctx);
-  assert.equal(typeof dispose, "function");
-  dispose();
-  await sleep(3400);
-  assert.equal(ctx._registrations.length, 0, "dispose 后回退定时器已清理");
-});
-
-test("client: disposer 卸载独立抽屉（unmount + 移除容器）", async () => {
-  reactDomMock.createRootCount = 0;
-  reactDomMock.renderCount = 0;
-  reactDomMock.unmountCount = 0;
-  let removed = 0;
-  globalThis.document = {
-    createElement: () => ({ appendChild() {}, remove() { removed += 1; } }),
-    body: { appendChild() {} },
-  };
-  try {
-    const ctx = fakeCtx();
-    const dispose = captured.apply(ctx);
-    await sleep(3400);
-    assert.ok(reactDomMock.createRootCount >= 1, "createRoot 被调用");
-    dispose();
-    assert.ok(reactDomMock.unmountCount >= 1, "unmount 被调用");
-    assert.ok(removed >= 1, "容器被移除");
-  } finally {
-    delete globalThis.document;
-  }
+  assert.equal(ctx._effects.length, 3, "页签类型 + 主体 + 标题");
+  assert.deepEqual(ctx._effects.map((entry) => entry.disposed), [false, false, false]);
+  for (const entry of ctx._effects) entry.dispose();
+  assert.deepEqual(ctx._effects.map((entry) => entry.disposed), [true, true, true], "三个注册的 disposer 全部跑过");
+  // 卸载路径本身可重复调用（幂等 disposer）。
+  for (const entry of ctx._effects) entry.dispose();
 });
 
 test("client: loadSkills 同 session 并发去重（只发一次 list；成功后同步 set-checked）", async () => {

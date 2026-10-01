@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在既有 dsh-skill-select 插件上落地四项改动：①repo 页字体/层级与 Other 计数修复；②codex/grok/hermes 外部技能（`/name@agent` 令牌，B2）；③一键更新 + 面板内摘要；④活动栏 + VSCode 式右滑面板。
+**Goal:** 在既有 dsh-skill-select 插件上落地四项改动：①repo 页字体/层级与 Other 计数修复；②codex/grok/hermes 外部技能（`/name@agent` 令牌，B2）；③一键更新 + 面板内摘要；④官方右侧栏页签（dsh ≥ 0.2 的 sidebar-right，两阶段注册）。
 
-**Architecture:** 单 npm 包、host/client 双半、纯 ESM、无构建。host 半（`lib/index.js`，Cordis Service）新增外部技能枚举/解析/注入与 `update` 路由；client 半（`lib/client.js`，ModuleLoader bundle）合并外部技能展示、改造草稿令牌、重写回退 UI 为活动栏。
+**Architecture:** 单 npm 包、host/client 双半、纯 ESM、无构建。host 半（`lib/index.js`，Cordis Service）新增外部技能枚举/解析/注入与 `update` 路由；client 半（`lib/client.js`，ModuleLoader bundle）合并外部技能展示、改造草稿令牌、以「页面类型 + keyed 插槽」两阶段注册官方右侧栏页签。
 
 **Tech Stack:** Node ≥20、Cordis Service、React 18（内联 style + CSS 变量）、`node:test`、`node --check`、新依赖 `yaml`。
 
@@ -26,7 +26,7 @@
 | 文件 | 责任 | 变更 |
 |------|------|------|
 | `lib/index.js` | host 半：Service + 路由 + 外部技能 + update | 修改 |
-| `lib/client.js` | client 半：面板/草稿/活动栏/更新按钮 | 修改 |
+| `lib/client.js` | client 半：面板/草稿/官方右侧栏页签/更新按钮 | 修改 |
 | `tests/index.test.js` | host 纯函数单测 | 修改 |
 | `tests/client.test.js` | client 纯函数冒烟 | 修改 |
 | `package.json` | 声明 `yaml` 依赖 | 修改 |
@@ -754,111 +754,95 @@ git commit -m "feat: client /name@agent 草稿令牌（B2）"
 
 ---
 
-### Task 7: client 活动栏 + VSCode 式右滑面板
+### Task 7: client 官方右侧栏页签（两阶段注册）
 
 **Files:**
-- Modify: `lib/client.js`（`SkillsDrawer` 重写）
+- Modify: `lib/client.js`（删除 `SkillsDrawer`/`mountStandalone` 自绘回退；`apply` 尾部改两阶段注册，新增 `SkillSelectTab`/`SkillSelectTitle`）
 
 **Interfaces:**
-- Produces: 无导出函数变更；仅 `SkillsDrawer` 内部结构
-- Consumes: `SkillPanel`（既有）
+- Produces: 阶段一页面类型（id `dsh-skill-select`、kind `skill-select`、guide 入口）、阶段二 keyed 插槽 `sidebar.right.pane.tab`（主体）与 `sidebar.right.pane.tab.title`（标题）；`exports.inject = ["conversation", "slots", "sidebarRightTabs"]`
+- Consumes: dsh ≥ 0.2 网页端官方服务 `ctx.sidebarRightTabs` / `ctx.slots`
 
-- [ ] **Step 1: 无纯函数单测（UI 冒烟由 `mountStandalone` 既有测试覆盖 render 调用次数）**
+- [ ] **Step 1: 写失败测试**
 
-- [ ] **Step 2: 实现**
-
-替换 `SkillsDrawer` 返回结构：把原「右上角圆钮 + 抽屉」改为「右侧缘活动栏 + 贴边面板」。
+在 `tests/client.test.js` 追加（假 ctx 的 `sidebarRightTabs.register` 收页面类型、`slots.register` 收 keyed 注册）：
 
 ```js
-    function SkillsDrawer({ rootCtx }) {
-      const sessions = rootCtx.get("sessions");
-      const sessionId = React.useSyncExternalStore(
-        (fn) => (sessions?.list ? sessions.list.subscribe(fn) : () => {}),
-        () => (sessions?.list ? sessions.list.getSnapshot().current : undefined),
-      );
-      const [open, setOpen] = React.useState(false);
-      const [top, setTop] = React.useState(56);
-      React.useEffect(() => {
-        const measure = () => {
-          const el = document.querySelector('[data-conversation-scroll]');
-          const rect = el ? el.getBoundingClientRect() : null;
-          setTop(rect && typeof rect.top === "number" ? Math.round(rect.top) : 56);
-        };
-        measure();
-        window.addEventListener("resize", measure);
-        return () => window.removeEventListener("resize", measure);
-      }, []);
-      React.useEffect(() => {
-        if (open && sessionId) loadSkills(sessionId);
-      }, [open, sessionId]);
+test("client: apply 向官方右侧栏注册页签类型（阶段一）", () => {
+  const { TAB_ID, TAB_KIND, GUIDE_ORDER } = captured.__test.sidebar;
+  const definition = ctx._tabTypes[0];
+  assert.equal(definition.id, TAB_ID);                   // "dsh-skill-select"
+  assert.equal(definition.kind, TAB_KIND, "kind 是 openTab 用的判别式"); // "skill-select"
+  assert.equal(definition.priority, "extension");
+  // guide 入口 id 必填：两个条目同时省略 id 会被注册表判为重复 id 直接抛错
+  assert.equal(definition.guide[0].id, TAB_ID);
+  assert.equal(definition.guide[0].order, GUIDE_ORDER);  // 70
+  assert.equal(typeof definition.guide[0].icon, "function"); // 内联 SVG 组件
+});
 
-      return ReactDOM.createPortal(
-        React.createElement(React.Fragment, null,
-          // 右侧缘竖向活动栏
-          React.createElement("div", {
-            style: {
-              position: "fixed", top, right: 0, bottom: 0, width: 40, zIndex: 9200,
-              display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 8,
-              background: "var(--dsw-specific-panel, #17191d)",
-              borderLeft: "1px solid var(--dsw-alias-divider-primary, rgba(128,128,128,0.25))",
-            },
-          },
-            React.createElement("button", {
-              type: "button", onClick: () => setOpen(!open),
-              title: open ? "Close skills" : "Skills",
-              "aria-label": open ? "Close skills" : "Skills",
-              style: {
-                width: 28, height: 28, borderRadius: 6, padding: 0, cursor: "pointer",
-                border: "none", background: "transparent",
-                color: "var(--dsw-alias-label-primary, #e8eaf0)",
-                display: "inline-flex", alignItems: "center", justifyContent: "center",
-              },
-            }, open
-              ? React.createElement("span", { style: { fontSize: 16, lineHeight: 1 } }, "×")
-              : React.createElement(SkillIcon, { size: 16 })),
-          ),
-          // VSCode 式贴边面板
-          React.createElement("div", {
-            style: {
-              position: "fixed", top, right: 40, bottom: 0, width: 380, maxWidth: "calc(92vw - 40px)",
-              zIndex: 9100, display: "flex", flexDirection: "column",
-              background: "var(--dsw-specific-panel, #17191d)",
-              borderLeft: "1px solid var(--dsw-alias-divider-primary, rgba(128,128,128,0.25))",
-              transform: open ? "translateX(0)" : "translateX(calc(100% + 40px))",
-              visibility: open ? "visible" : "hidden",
-              transition: "transform .25s ease, visibility 0s linear " + (open ? "0s" : ".25s"),
-            },
-          },
-            React.createElement("div", {
-              style: {
-                height: 36, padding: "0 12px", display: "flex", alignItems: "center", gap: 6, flexShrink: 0,
-                borderBottom: "1px solid var(--dsw-alias-divider-primary, rgba(128,128,128,0.25))",
-              },
-            },
-              React.createElement(SkillIcon, { size: 15 }),
-              React.createElement("span", { style: { fontSize: 13, fontWeight: 600 } }, "Skills")),
-            open ? React.createElement("div", {
-              style: { flex: 1, minHeight: 0, display: "flex", flexDirection: "column" },
-            }, sessionId
-              ? React.createElement(SkillPanel, { rootCtx, sessionId, embedded: false })
-              : React.createElement("div", { style: { padding: 16, fontSize: 12, color: "var(--dsw-alias-label-tertiary, #8a8f98)" } }, "No open session.")) : null,
-          ),
-        ),
-        document.body,
-      );
+test("client: apply 注册 keyed 页签主体与标题（阶段二，key === 阶段一的 id）", () => {
+  const { TAB_ID } = captured.__test.sidebar;
+  assert.equal(bodyRegistration.name, "sidebar.right.pane.tab");
+  assert.equal(bodyRegistration.key, TAB_ID, "key 必须是 id，不是 kind");
+  assert.equal(titleRegistration.name, "sidebar.right.pane.tab.title");
+  assert.equal(titleRegistration.key, TAB_ID);
+});
+```
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `node --test tests/client.test.js`
+Expected: FAIL（旧 client 半没有 `sidebarRightTabs` 注册）
+
+- [ ] **Step 3: 实现**
+
+删除自绘回退整块（`SkillsDrawer`/`mountStandalone`/`SIDEBAR_CSS`/`PanelRightIcon`），按两阶段契约注册；两处注册都包在 `ctx.effect(...)`，keyed 插槽外层再经 `ctx.slots.inject(slotName, cb)` 兜加载顺序：
+
+```js
+    const TAB_ID = "dsh-skill-select";   // 页签系统里的实现身份，也是阶段二插槽 key
+    const TAB_KIND = "skill-select";     // ctx.sidebarRight.openTab(kind) 的判别式
+    const GUIDE_ORDER = 70;
+
+    function apply(ctx) {
+      ctx.effect(() => ctx.sidebarRightTabs.register({
+        id: TAB_ID,
+        kind: TAB_KIND,
+        priority: "extension",
+        title: () => "Skills",
+        guide: [{
+          id: TAB_ID,
+          order: GUIDE_ORDER,
+          title: () => "Skills",
+          description: () => "Pick which skills this session may run",
+          icon: SkillIcon,               // 内联 SVG：client 只能 require 平台种子模块
+        }],
+      }), "skill-select: tab type");
+
+      ctx.effect(() => ctx.slots.inject("sidebar.right.pane.tab", () => ctx.slots.register({
+        name: "sidebar.right.pane.tab",
+        key: TAB_ID,                     // 衔接点：key 是阶段一的 id（不是 kind）
+        inject: () => ({ rootCtx: ctx }),
+      }, SkillSelectTab)), "skill-select: tab body");
+
+      ctx.effect(() => ctx.slots.inject("sidebar.right.pane.tab.title", () => ctx.slots.register({
+        name: "sidebar.right.pane.tab.title",
+        key: TAB_ID,
+      }, SkillSelectTitle)), "skill-select: tab title");
     }
 ```
 
-- [ ] **Step 3: 运行冒烟确认**
+`SkillSelectTab({ rootCtx, sessionId, useTabInfo })`：`sessionId` 是会话作用域标准 prop；owner 侧共享是 `{}`，`tab`/`visible` 不作为普通 props 传入，可见性只能读 `useTabInfo().tab.visible`。visible 时 `loadSkills(sessionId)`，仅在隐藏→重新显示时 `resetCheckedForSession`；无会话显示 "No open session."。`SkillSelectTitle({ useTabInfo })` 渲染 `SkillIcon` + `tab.title`。`exports.inject` 改为 `["conversation", "slots", "sidebarRightTabs"]`（`slots`/`sidebarRightTabs` 是 dsh ≥ 0.2 网页端始终提供的服务）。
+
+- [ ] **Step 4: 运行冒烟确认**
 
 Run: `node --test tests/client.test.js`
-Expected: PASS（`mountStandalone` render 计数不变）
+Expected: PASS（阶段一/阶段二/ctx.effect disposer 清理/visible 门控测试全绿；`node --check lib/client.js` 也通过）
 
-- [ ] **Step 4: 提交**
+- [ ] **Step 5: 提交**
 
 ```bash
-git add lib/client.js
-git commit -m "feat: client 活动栏 + VSCode 式右滑面板"
+git add lib/client.js tests/client.test.js
+git commit -m "feat(client): 官方右侧栏两阶段注册页签，删除自绘回退抽屉"
 ```
 
 ---
@@ -944,7 +928,7 @@ git commit -m "feat: client 更新按钮 + 面板内变更摘要"
 
 **Files:**
 - Modify: `package.json`（`dependencies` 增加 `"yaml"`）
-- Modify: `README.md`（外部技能、`/name@agent`、更新按钮、活动栏说明同步）
+- Modify: `README.md`（外部技能、`/name@agent`、更新按钮、官方右侧栏两阶段注册说明同步）
 - Test: 全量
 
 - [ ] **Step 1: 声明依赖**
@@ -961,7 +945,7 @@ git commit -m "feat: client 更新按钮 + 面板内变更摘要"
 
 - [ ] **Step 2: 更新 README**
 
-在「使用」与「开发」节补充：外部 agent 技能来源与 `/name@agent` 令牌、更新按钮行为、活动栏回退 UI。
+在「使用」与「开发」节补充：外部 agent 技能来源与 `/name@agent` 令牌、更新按钮行为、官方右侧栏两阶段注册说明。
 
 - [ ] **Step 3: 全量验证**
 
@@ -979,6 +963,6 @@ git commit -m "chore: yaml 依赖 + README 同步"
 
 ## Self-Review（已执行）
 
-- **Spec coverage**：§1.1/1.2 字体缩进 Other 计数 → Task 5；§2.5 外部技能枚举/解析 → Task 1；注入 → Task 2；list/summarize/set-checked → Task 3；§2.6 更新 → Task 4/8；§2.7 活动栏 → Task 7；B2 令牌 → Task 6；依赖 → Task 9。R1–R12 均有对应任务。
+- **Spec coverage**：§1.1/1.2 字体缩进 Other 计数 → Task 5；§2.5 外部技能枚举/解析 → Task 1；注入 → Task 2；list/summarize/set-checked → Task 3；§2.6 更新 → Task 4/8；§2.7 官方右侧栏两阶段契约 → Task 7；B2 令牌 → Task 6；依赖 → Task 9。R1–R12 均有对应任务。
 - **Placeholder scan**：无 TBD/TODO；每处代码步骤给出具体代码。
 - **Type consistency**：`id`（`agent:name`）贯穿 host 与 client；`ExternalSkillView` 字段（`id/agent/name/repo/usage/defaultStart/description/whenToUse`）在 Task 1/3/5/6 一致；`UpdateItem` 字段（`id/name/source/status/before/after/changes/reason`）在 Task 4/8 一致。

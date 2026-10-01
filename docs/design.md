@@ -1,9 +1,9 @@
 # dsh-skill-select 设计文档
 
 > DSH Web 插件：侧边栏 skill 选择器（英文 UI）。读取已配置的全部 skill（标注
-> Project/Global 与所属 repo，并额外扫描 codex/grok/hermes 的用户技能），以页签
-> 形式合并进 dsh-better-sidebar（未安装/被禁用时自绘侧边栏**顶替其位置**：开关在
-> "Session log" 右侧、以 `#root margin-right` 推进布局）。勾选后把 `/skill` 手势填入
+> Project/Global 与所属 repo，并额外扫描 codex/grok/hermes 的用户技能），以
+> **两阶段注册**（页面类型 + keyed 插槽）接入 dsh **官方右侧栏**（sidebar-right，
+> dsh ≥ 0.2；不依赖任何第三方侧边栏，也没有自绘回退 UI）。勾选后把 `/skill` 手势填入
 > 当前会话输入框草稿（外部 agent 技能改为
 > 下一条消息直接注入），随用户下一条消息生效（由 DSH 宿主在 pre-step 边界自动注入
 > `<skill_content>`）。无简介的 skill 由宿主侧 LLM 生成一句英文简介并缓存；提供
@@ -14,10 +14,12 @@
 **目标（对应用户需求）**
 1. 自动读取所有已下载/配置的 skill，并区分全局（`~/.dsh/skills` 等 user 根）与
    局部（项目 `.dsh/skills` 等 project 根）skill。
-2. 以 sidebar 形式展示；已安装 dsh-better-sidebar 时自动注册为其页签
-   （`ctx.betterSidebar.registerTab`）；未安装/被禁用时自绘侧边栏**顶替其位置**
-   （开关在右上角、"Session log" 右侧，`#root margin-right` 推进布局，完全参照
-   better-sidebar），而非浮动窗口或悬浮圆钮。
+2. 以 sidebar 形式展示：注册进 dsh **官方右侧栏**（sidebar-right，dsh ≥ 0.2），
+   两阶段注册——阶段一 `ctx.sidebarRightTabs.register` 声明页面类型（id
+   `dsh-skill-select`、kind `skill-select`、guide 入口），阶段二 keyed 插槽
+   `sidebar.right.pane.tab` / `sidebar.right.pane.tab.title` 提供主体与胶囊
+   标题（见 §2.7）。不依赖 dsh-better-sidebar 等第三方侧边栏，也不再有自绘
+   回退抽屉（`SkillsDrawer`/`mountStandalone` 已删除）。
 3. 展示每个 skill 的名称、简介与**所属 repo 徽标**：repo 由内置映射表
    （superpowers 全家桶等）+ 嵌套目录（`<repo>/<skill>`）路径推断得出，两者都
    无法判定时不显示；判定过程绝不修改 skill 文件。
@@ -32,8 +34,8 @@
 6. **Guard 开关（默认关闭）**：宿主始终注册 `ctx.tools.guard` 守卫，但守卫仅在
    开关打开时生效——打开时模型通过 `skill` 工具调用**不在**「默认启动名单 ∪
    本会话已勾选名单」的技能被拒绝（模型收到明确错误、绝不执行）；关闭时完全放行，
-   回到无本插件的默认工作流。开关经 `set-guard` 持久化到 domain，UI 位于标题栏
-   "Skills" 旁。用户手动 `/skill` 手势始终不受限；技能目录不隐藏。
+   回到无本插件的默认工作流。开关经 `set-guard` 持久化到 domain，UI 位于面板
+   标题栏（Skills/Auto-start 页签旁）。用户手动 `/skill` 手势始终不受限；技能目录不隐藏。
 7. 调用次数为真实调用统计：`/skill-name` 手势、`/repo名` 展开的成员、默认注入
    的技能都计入（同一步骤同一技能只 +1），写入插件 storage domain；仅从安装后
    累计，不回填历史。
@@ -82,12 +84,14 @@ skill-select/
 │   └── client.js         # client 半：window.__ModuleLoader__.load(...)
 ├── tests/
 │   ├── index.test.js     # host 半单元测试（node --test）
-│   └── client.test.js    # client 半冒烟测试
+│   ├── client.test.js    # client 半冒烟测试
+│   ├── service.test.js   # SkillSelectService 装配冒烟（domain/路由/guard/pre-step）
+│   └── dsh-compat.test.js # DSH 兼容护栏（peer 范围 / 种子模块表 / 具名导出）
 ├── docs/
 └── README.md
 ```
 
-新增运行时依赖：`yaml`（前端解析外部 SKILL.md frontmatter；`description: >`
+新增运行时依赖：`yaml`（宿主侧解析外部 SKILL.md frontmatter；`description: >`
 折叠标量等正则不可靠，`yaml` 已在依赖树中）。
 
 ### 2.1 Host 半（lib/index.js）
@@ -96,16 +100,30 @@ Cordis Service 类插件（loader 直接挂类，参照 dsh-pin 的 PinRegistry�
 
 ```js
 export default class SkillSelectService extends Service {
-  static inject = ["skills", "sessions", "webServer", "storageDomain", "settings", "llm", "tools"];
+  static inject = ["skills", "sessions", "webServer", "storageDomain", "agentDefaultModel", "llm", "tools"];
   constructor(ctx) { super(ctx, "skillSelect"); }
   async [Service.init]() { /* 打开 domain、注册路由、注册 guard 与 pre-step 观察者 */ }
 }
 ```
 
 职责（与上一版一致的部分从略，仅列关键点）：
-- **枚举**：`ctx.sessions.get(sessionId)` → `session.header.cwd` →
-  `ctx.skills.list({ cwd, scope })`。scope 取自 `ctx.agents.get(sessionId)`
-  （与 `dsh-tool-skill` 一致）；`agents` 缺失时退化为仅全局层。
+- **枚举（rc.2 的冷/活两条路）**：`ctx.sessions` 在 rc.2 只是**活会话**的内存
+  store，网页端从历史打开的会话不在其中，`sessions.get(id)` 返回 `undefined`
+  ——早期单路径实现因此对屏幕上明明存在的会话报 404 `session "…" not found`。
+  `openSkillView()` 对齐官方 `SessionSkillCatalog` 的读法：活会话
+  （`ctx.agents.get(id)`）直接当 scope，注册表取
+  `ctx.agentPresets.serviceFor(agent, "skills")`；冷会话经
+  `ctx.sessionQuery.observeSession(id, { projectionMode })` 读
+  `header.cwd` 与 `projections.values.agentPreset`，再用
+  `ctx.agentPresets.acquireScope(preset)` 拿常驻 scope
+  （`{ key } & AsyncDisposable`）。observation 与 lease 都在 `finally` 里释放
+  （`Symbol.dispose` / `Symbol.asyncDispose`）。
+  `SESSION_QUERY_SESSION_NOT_FOUND` → 404，其余查询错误 → 500；
+  `agentPresets` 缺失（旧宿主）时注册表退回 `ctx.skills`、`sessionQuery` 缺失时
+  退回 `sessions.get()`。两条路汇合后仍是一条
+  `skills.list({ cwd, scope })`。冷读失败最常见的表现是 200 且 `skills: []`：
+  `acquireScope` 牵动 shell / sandbox / tool 依赖链，profile 里任一条
+  `@deepseek-ai/dsh-*` 被版本门禁跳过都会让它抛错。
 - **来源分类**：`classifySource(source)` → `project`/`user`/`bundled`/`other`。
 - **简介补齐**：`summary.description` 非空直接用；为空查 domain 缓存（name+hash）；
   仍无则客户端调 `summarize` 生成。
@@ -124,17 +142,22 @@ export default class SkillSelectService extends Service {
 ### 2.2 Client 半（lib/client.js）
 
 `window.__ModuleLoader__.load({ id: "dsh-skill-select", factory })`，
-`exports = { apply, inject: ["conversation"] }`。
+`exports = { apply, inject: ["conversation", "slots", "sidebarRightTabs"] }`。
+`slots` 与 `sidebarRightTabs` 是 dsh ≥ 0.2 网页端始终提供的服务，直接写进
+inject；package.json `dsh.client.inject` 对应列
+`["@deepseek-ai/dsh-client-ui-conversation", "@deepseek-ai/dsh-client-ui-sidebar-right"]`。
 
-- **better-sidebar 集成（可选服务）**：探测到 `ctx.betterSidebar` 即注册页签
-  （`registerTab`）；否则 `mountStandalone` 挂载自绘侧边栏（见 §2.7），其开关位置
-  （右上角、"Session log" 右侧）与布局推进（`#root` 的 `margin-right` 挤开主内容）
-  完全参照 better-sidebar。
-- **tab 描述符**：`{ id: "skill-select", title: "Skills", icon, single: true,
-  order: 90, component }`；`component` 接收 `{ ctx, scope, tab, visible }`。
-- **数据**：`POST /skill-select/api/list {sessionId}` → `{ skills, external }`
+- **官方右侧栏集成（两阶段，见 §2.7）**：阶段一
+  `ctx.sidebarRightTabs.register` 声明页面类型；阶段二 keyed 插槽
+  `sidebar.right.pane.tab`（主体）与 `sidebar.right.pane.tab.title`（胶囊
+  标题）。全部注册包在 `ctx.effect(...)` 里，卸载/HMR 由框架回收。
+- **页签主体 props**：框架给 `sessionId`（会话作用域标准 prop）与
+  `useTabInfo()` hook；owner `inject` 共享是 `{}`，`tab`/`visible` 不会作为
+  普通 props 传进来。主体按 `useTabInfo().tab.visible` 门控
+  `loadSkills()`，隐藏→重新显示时重置本会话勾选（会话切换只刷新、不清空）。
+- **数据**：`POST /skill-select/api/list {sessionId}` → `{ skills, external, guard }`
   合并展示；仅展示 `userInvocable` 项；`description` 为 `null` 进串行
-  `summarize` 队列回填。tab/抽屉打开与 `visible` 变化刷新，另设手动刷新 + 搜索。
+  `summarize` 队列回填。页签可见时刷新，另设手动刷新 + 搜索。
 - **面板分页**：Skills / Auto-start 两页。
 - **排序下拉框**：Repo（默认）/ Name / Most used / Source；纯函数
   `sortByName`/`sortByUsage`/`groupByRepo`；两页共用同一排序选择。
@@ -145,7 +168,7 @@ export default class SkillSelectService extends Service {
   `set-defaults`），Source 组头只做折叠。组按名升序、无 repo 最后。
 - **行内**：复选框在名字左侧；技能名 + 来源小徽标；repo/source 模式由组头承载组名
   （不逐行重复），组内行 `padding-left` 缩进。
-- **勾选语义**：Skills 勾选是本会话临时选择，**每次重新打开侧边栏重置为未勾选**
+- **勾选语义**：Skills 勾选是本会话临时选择，**页签每次隐藏→重新显示都重置为未勾选**
   （`resetCheckedForSession`，清 localStorage + 同步 `set-checked` + 剥离草稿令牌）；
   Auto-start 勾选走 `set-default`/`set-defaults` 持久化到 domain，跨打开、跨重启保持。
 - **勾选 → 草稿（简洁令牌）**：勾选状态按 session 存 localStorage
@@ -164,9 +187,11 @@ export default class SkillSelectService extends Service {
 
 ### 2.4 持久化（storage domain）
 
-`defineDomain({ name: "skill_select", version: 1, ... })`；**schema 不变**——
-`summaries`/`usage` 仍是 `z.record`，`defaults` 仍是 `z.array(z.string())`，复合 id
-（`agent:name`）直接作为 string key 使用，无需迁移：
+`defineDomain({ name: "skill_select", version: 1, ... })`；domain 保持
+version 1，新字段只按 zod 默认值扩展——`summaries`/`usage` 仍是 `z.record`，
+`defaults` 仍是 `z.array(z.string())`，复合 id（`agent:name`）直接作为 string
+key 使用，Guard 开关是后加的 `guard: z.boolean().default(false)`（缺省即关闭），
+均无需迁移：
 
 ```js
 z.object({
@@ -181,6 +206,7 @@ z.object({
     lastUsedAt: z.string(),
   })).default({}),
   defaults: z.array(z.string()).default([]),  // 技能名或复合 id（全局）
+  guard: z.boolean().default(false),          // Guard 开关（全局）
 })
 ```
 
@@ -265,35 +291,57 @@ interface ExternalSkillView {
 > superpowers 只有整组根级来源标记，更新时被报为 `skipped`（不重拉）；其余技能
 > 显示“无更新源/跳过”。机制已就位，将来以 git/per-skill 来源方式安装即自动可更新。
 
-### 2.7 回退 UI：自绘侧边栏（顶替 better-sidebar 位置）
+### 2.7 官方右侧栏页签（两阶段注册契约）
 
-无 better-sidebar 时的自绘 UI（`SkillsDrawer`/`mountStandalone`），开关位置与布局
-推进完全参照 better-sidebar：
-- **开关**：右上角固定小按钮（`position:fixed; top:3px; right:10px`，28×28 面板图标），
-  位于会话头部 "Session log" 胶囊的右侧，悬停显示 **skill-select**；面板收起时给会话
-  头部加 `padding-right`（`body[data-skill-select-sidebar-collapsed]`）让 "Session log"
-  让出右上角，避免被开关遮挡。
-- **点击外部关闭**：面板打开时监听 `document` 的 `mousedown`，点击面板与开关之外的
-  区域自动 `setOpen(false)`。
-- **布局推进（缩放规则）**：面板打开时向 `<html>` 写入 CSS 变量
-  `--skill-select-sidebar-width`，注入的样式以 `#root { margin-right:
-  var(--skill-select-sidebar-width) }` 把主内容向左挤开（**非 transform 缩放**），
-  面板占据右侧腾出的空间；窄屏（≤767px）改为全宽覆盖、不推进。
-- **展示方式**：面板 `top/right/bottom` 贴边、`width:400px`、`translateX(102%↔0)`
-  滑入、左分隔线；顶部标题栏（Skills + Guard 开关）+ Skills/Auto-start 子页签，
-  内部复用 `SkillPanel`。
-- 当前会话：`ctx.get("sessions").list` snapshot 的 `current`；打开时刷新列表。
-- better-sidebar 存在时仍走页签（现有逻辑不动）。
+dsh ≥ 0.2 网页端的 `sidebar-right` 按「页面类型 + keyed 插槽」两阶段注册页签，
+两阶段都包在 `ctx.effect(...)` 里（插件 fiber 结束时自动撤销，HMR/卸载不留
+第二次注册的冲突）：
+
+- **阶段一：页面类型**——`ctx.sidebarRightTabs.register({ id: "dsh-skill-select",
+  kind: "skill-select", priority: "extension", title: () => "Skills",
+  guide: [{ id: "dsh-skill-select", order: 70, title: () => "Skills",
+  description: () => "Pick which skills this session may run", icon: SkillIcon }] })`：
+  - `id` 是页签系统的实现身份（也是阶段二 keyed 插槽的 key）；`kind` 是传给
+    `ctx.sidebarRight.openTab(kind)` 的判别式；页面类型不声明 patterns（按 kind
+    打开，不认领任何资源地址）；
+  - `guide` 决定右侧栏 guide 页的入口：`guide[].id` **必填**——两个都省略 `id`
+    的 guide 条目会被注册表判为 "duplicate guide entry id" 直接抛错；
+  - 图标必须是**内联 SVG 组件**（`SkillIcon`）：client bundle 只能 `require()`
+    平台种子模块（`react`、`react-dom`、`react-dom/client`、`react/jsx-runtime`、
+    `@deepseek-ai/cordis`、`@deepseek-ai/dsh-client-store`、
+    `@deepseek-ai/dsh-client-ui-slots`、`@deepseek-ai/dsh-client-ui-primitives`、
+    `@deepseek-ai/dsh-client-ui-dockkit`），外部图标包一律引不到。
+- **阶段二：keyed 插槽**提供实现——主体
+  `ctx.slots.register({ name: "sidebar.right.pane.tab", key: "dsh-skill-select",
+  inject: () => ({ rootCtx: ctx }) }, SkillSelectTab)`，胶囊标题
+  `ctx.slots.register({ name: "sidebar.right.pane.tab.title", key: "dsh-skill-select" },
+  SkillSelectTitle)`（图标 + tab 记录里的标题）：
+  - `key` 必须等于阶段一 `register` 的 **id**（不是 kind）；给 keyed 插槽挂
+    list 形的 `{id, order}` 是注册失败；
+  - 外层经 `ctx.slots.inject(slotName, cb)` 登记，插槽宿主出现晚于插件 apply
+    也能补挂（加载顺序安全）。
+- **页签主体 props**：框架给 `sessionId`（`sidebar.right.pane.tab` 的会话作用域
+  标准 prop）与 `useTabInfo()` hook；`rootCtx` 由插件自己的 `inject` 声明注入，
+  而宿主 owner 的共享是 `{}`，所以 `tab`/`visible` 不会作为普通 props 传进来，
+  可见性只能读 `useTabInfo().tab.visible`。`SkillSelectTab` 以它门控
+  `loadSkills()`，仅在隐藏→重新显示时 `resetCheckedForSession`（会话切换只刷新
+  不清空）；无会话时显示 "No open session."。
+- **openTab 语义**：`ctx.sidebarRight.openTab(kind, ...)` 总会展开侧栏，画面内
+  没有 Session 时抛错。
+- 旧的三档策略（官方/better-sidebar/自绘抽屉）与 `SkillsDrawer`/`mountStandalone`/
+  `SIDEBAR_CSS`/`PanelRightIcon` 等自绘回退代码已全部删除，不再有回退 UI。
 
 ## 3. 契约
 
 ### 3.1 路由 `POST /skill-select/api/<method>`（JSON body）
 
 统一响应：成功 `{ok:true, value}`；失败 `{ok:false, error:{code, message}}`。
+路由级错误：非可信 Host → `forbidden`（403）、非 POST → `method-error`（405）、
+未知 method → `not-found`（404）。
 
 **list**
 - 请求：`{ "sessionId": "<id>" }`
-- 成功：`{ "sessionId", "skills": SkillView[], "external": ExternalSkillView[] }`
+- 成功：`{ "sessionId", "skills": SkillView[], "external": ExternalSkillView[], "guard": boolean }`
 
 ```ts
 interface SkillView {
@@ -313,6 +361,14 @@ interface SkillView {
 **set-default**
 - 请求：`{ "name": "<skill-name|agent:name>", "on": boolean }`
 - 成功：`{ "name", "defaultStart" }`；写插件 domain（全局生效）
+
+**set-defaults**
+- 请求：`{ "names": ["<skill-name|agent:name>", ...], "on": boolean }`
+- 成功：`{ "count" }`（新默认名单长度）；repo 组头批量切换默认启动用
+
+**set-guard**
+- 请求：`{ "on": boolean }`
+- 成功：`{ "guard" }`；持久化到 domain（全局生效），list 回带当前值
 
 **set-checked**
 - 请求：`{ "sessionId": "<id>", "skills": ["<skill-name|agent:name>", ...] }`
@@ -350,6 +406,14 @@ interface UpdateItem {
 
 ## 4. 安装
 
+0. **版本硬门禁——插件静默不加载时最先查这里**：dsh 0.2.0-rc.2 起 `dsh-app-boot`
+   取 `package.json` peerDependencies 中名为 `@deepseek-ai/dsh` 或以
+   `@deepseek-ai/dsh-` 开头的每条范围，对运行时版本做
+   `semver.satisfies(runtimeVersion, range, { includePrerelease: true })`；任一
+   不满足即**整棵 bundle 被跳过**——模块根本不会被 import、插件行显示禁用、
+   没有任何报错。本插件要求 `^0.2.0-rc.2`。`dsh.plugin.json` 的 `engines.dsh`
+   在 rc.2 不参与判定（仅元数据）。确需强行加载的逃生门：
+   `dsh plugin allow-version`（写入 `<profile>/compatibility.json`）。
 1. `~/.dsh/profiles/web/package.json`：
    - `dependencies` 增加 `"dsh-skill-select": "link:/path/to/skill-select"`
    - `dsh.profile.bundles` 增加 `"dsh-skill-select"`
@@ -360,10 +424,12 @@ interface UpdateItem {
 
 - [ ] R1 列表包含 `~/.dsh/skills` 下全部 skill 且标记“全局”，项目 `.dsh/skills`
       的标记“局部”。
-- [ ] R2 better-sidebar 存在时注册 Skills 页签；不存在/被禁用时，右上角（"Session
-      log" 右侧）出现侧边栏开关，点击后右侧面板滑出并以 `#root margin-right` 把
-      主内容向左挤开（无遮罩、无 transform 缩放），开关位置与布局推进对齐
-      better-sidebar。
+- [ ] R2 官方右侧栏：阶段一 `ctx.sidebarRightTabs.register` 声明页面类型（id
+      `dsh-skill-select`、kind `skill-select`、带 `id`/`order`/内联 SVG 图标的 guide
+      条目），右侧栏 guide 页出现 "Skills" 入口；阶段二 keyed 插槽
+      `sidebar.right.pane.tab` / `sidebar.right.pane.tab.title`（key = 阶段一 id）渲染
+      主体与胶囊标题；主体按 `useTabInfo().tab.visible` 门控拉取，隐藏→重新显示时
+      重置本会话勾选；已无 better-sidebar 集成与自绘回退代码。
 - [ ] R3 repo 徽标/分组：技能名后显示 repo 徽标；Skills 页默认 repo 分组、组头
       三态复选 + 折叠（默认收起）；repo 全选草稿只写 `/repo名`，发送后成员注入
       且各 +1；repo 组头名等宽字体、略大于技能名，组内技能行缩进。
